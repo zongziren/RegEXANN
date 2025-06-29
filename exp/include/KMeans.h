@@ -10,3 +10,4 @@ struct KMeansResult {
 };
 
 KMeansResult run_kmeans(const std::vector<std::vector<float>>& data, int k, int max_iters);
+void dump_cluster_assignments(const std::vector<std::vector<int>>& clusters, const std::string& filename);

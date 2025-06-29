@@ -7,7 +7,6 @@
 #include <iostream>
 #include <fstream>
 
-
 float euclidean_distance(const std::vector<float>& a, const std::vector<float>& b) {
     float sum = 0;
     for (size_t i = 0; i < a.size(); ++i)
@@ -55,7 +54,7 @@ SearchResult perform_search(const std::string& regex_str,
     std::set<int> candidate_clusters;
     auto grams = extract_3grams(regex_str);
 
-    dump_query_cluster_debug(regex_str, gram_index, "./debug/query_debug.txt");
+    //dump_query_cluster_debug(regex_str, gram_index, "./debug/query_debug.txt");
 
     for (const auto& gram : grams) {
         if (gram_index.count(gram))

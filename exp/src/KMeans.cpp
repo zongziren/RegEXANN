@@ -3,6 +3,8 @@
 #include <cstdlib>
 #include <limits>
 #include <cmath>
+#include <fstream>
+#include <iostream>
 
 float euclidean_dist2(const std::vector<float>& a, const std::vector<float>& b) {
     float sum = 0;
@@ -57,4 +59,15 @@ KMeansResult run_kmeans(const std::vector<std::vector<float>>& data, int k, int 
         clusters[assignments[i]].push_back(i);
 
     return {assignments, centroids, clusters};
+}
+
+void dump_cluster_assignments(const std::vector<std::vector<int>>& clusters, const std::string& filename) {
+    std::ofstream fout(filename);
+    for (size_t cid = 0; cid < clusters.size(); ++cid) {
+        fout << "Cluster " << cid << " (" << clusters[cid].size() << " vectors): ";
+        for (int vid : clusters[cid]) fout << vid << " ";
+        fout << "\n";
+    }
+    fout.close();
+    std::cout << "[DEBUG] Cluster assignments dumped to " << filename << std::endl;
 }
