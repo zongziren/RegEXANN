@@ -6,6 +6,9 @@
 
 struct SearchResult {
     std::vector<int> top_ids;
+    double setop_time_ms = 0.0;   // NEW
+    double query_time_ms = 0.0;   // NEW
+
 };
 
 SearchResult perform_search(const std::string& regex,
