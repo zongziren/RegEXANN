@@ -30,7 +30,6 @@ if __name__ == "__main__":
     if len(sys.argv) != 4:
         print("Usage: python evaluate_recall.py <groundtruth.txt> <output.txt> <K>")
         sys.exit(1)
-
     gt_file = sys.argv[1]
     out_file = sys.argv[2]
     K = int(sys.argv[3])

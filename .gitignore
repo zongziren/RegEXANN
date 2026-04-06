@@ -1,9 +1,13 @@
-dataset/arxiv100K
+dataset/arxiv
 dataset/arxiv10K
-dataset/SIFT100
-dataset/SIFT10K
+dataset/arxiv100K
+
+dataset/sift
+dataset/sift100K
 dataset/siftsmall
+
 dataset/dblp
+
 build
 exp/build
 .vscode
