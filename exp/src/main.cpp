@@ -1,234 +1,491 @@
-// src/main.cpp
-#include <iostream>
-#include <fstream>
-#include <vector>
-#include <string>
-#include <sstream>
-#include <cmath>
-#include <regex>
-#include <unordered_map>
-#include <set>
+// src/main.cpp – RegExANN unified driver (complete implementation).
+//
+// ══════════════════════════════════════════════════════════════════════════════
+//  Usage
+// ══════════════════════════════════════════════════════════════════════════════
+//
+//  ./regann <vectors.fvecs> <strings.txt> <queries.txt> <K>
+//           <clusters> <output.txt> <max_iter> <algorithm> [options...]
+//
+//  Algorithms
+//  ----------
+//  ann          RegExANN (k-means + trigram index + PQ)
+//  hier         Two-level hierarchical RegExANN
+//  groundtruth  Full-scan exact search  (generate ground truth)
+//  baseline     Alias for groundtruth
+//  prefilter    Pre-filtering baseline  (regex first, then kNN)
+//  postfilter   Post-filtering baseline (kNN first, then regex)
+//
+//  Options (key=value)
+//  -------------------
+//  pq_m=N         PQ subspaces                        [ann/hier, default 8]
+//  pq_ksub=N      PQ centroids per subspace            [ann/hier, default 256]
+//  k0=N           Coarse clusters for hier             [hier, default sqrt(clusters)]
+//  oversample=N   Post-filter oversampling factor      [postfilter, default 10]
+//  nprobe=N       Coarse clusters to probe per query   [hier, default k0/2]
+//  gt=<file>      Ground-truth file for Recall@K
+//  save=<prefix>  Save built index to <prefix>.{kmidx,gramidx,pqidx}
+//  load=<prefix>  Load pre-built index (skips build step)
+//  fmt=fvecs      Input vector format: fvecs (default) or bvecs
+//
+//  Examples
+//  --------
+//  # Build & run RegExANN, save index for later
+//  ./regann v.fvecs s.txt q.txt 10 100 out.txt 30 ann save=idx/arxiv
+//
+//  # Re-run queries using saved index (fast — no rebuild)
+//  ./regann v.fvecs s.txt q.txt 10 100 out2.txt 30 ann load=idx/arxiv gt=gt.txt
+//
+//  # Hierarchical (two-level) RegExANN
+//  ./regann v.fvecs s.txt q.txt 10 100 out.txt 30 hier k0=10 pq_m=8 gt=gt.txt
+
 #include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <fstream>
+#include <functional>
+#include <iostream>
 #include <queue>
+#include <set>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
-#include "KMeans.h"
+#include "Baseline.h"
+#include "Eval.h"
+#include "HierarchicalIndex.h"
 #include "Index.h"
+#include "KMeans.h"
+#include "PQ.h"
 #include "Search.h"
+#include "Serialize.h"
 
-std::vector<std::vector<float>> load_fvecs(const std::string &filename)
-{
-    std::ifstream file(filename, std::ios::binary);
-    std::vector<std::vector<float>> vectors;
-    if (!file)
-        throw std::runtime_error("Cannot open fvec file.");
-    while (file.peek() != EOF)
-    {
-        int dim;
-        file.read(reinterpret_cast<char *>(&dim), sizeof(int));
+// ─────────────────────────────────────────────────────────────────────────────
+// Option parsing
+// ─────────────────────────────────────────────────────────────────────────────
+
+struct Options {
+    int  pq_m        = 8;
+    int  pq_ksub     = 256;
+    int  k0          = 0;    // 0 = auto (sqrt of clusters)
+    int  nprobe      = 0;    // 0 = auto
+    int  oversample  = 10;
+    std::string gt_file;
+    std::string save_prefix;
+    std::string load_prefix;
+    std::string fmt = "fvecs";
+
+    void parse(int argc, char* argv[], int start) {
+        for (int i = start; i < argc; ++i) {
+            std::string a = argv[i];
+            auto eq = a.find('=');
+            if (eq == std::string::npos) continue;
+            std::string key = a.substr(0, eq);
+            std::string val = a.substr(eq + 1);
+            if      (key == "pq_m")       pq_m        = std::stoi(val);
+            else if (key == "pq_ksub")    pq_ksub     = std::stoi(val);
+            else if (key == "k0")         k0          = std::stoi(val);
+            else if (key == "nprobe")     nprobe      = std::stoi(val);
+            else if (key == "oversample") oversample  = std::stoi(val);
+            else if (key == "gt")         gt_file     = val;
+            else if (key == "save")       save_prefix = val;
+            else if (key == "load")       load_prefix = val;
+            else if (key == "fmt")        fmt         = val;
+            else std::cerr << "[WARN] Unknown option: " << a << "\n";
+        }
+    }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Vector file I/O  (fvecs and bvecs)
+// ─────────────────────────────────────────────────────────────────────────────
+
+static std::vector<std::vector<float>> load_fvecs(const std::string& p) {
+    std::ifstream f(p, std::ios::binary);
+    if (!f) throw std::runtime_error("Cannot open: " + p);
+    std::vector<std::vector<float>> v;
+    while (f.peek() != EOF) {
+        int dim; f.read(reinterpret_cast<char*>(&dim), 4);
+        if (!f) break;
         std::vector<float> vec(dim);
-        file.read(reinterpret_cast<char *>(vec.data()), sizeof(float) * dim);
-        vectors.push_back(vec);
+        f.read(reinterpret_cast<char*>(vec.data()), 4 * dim);
+        v.push_back(std::move(vec));
     }
-    return vectors;
+    return v;
 }
 
-std::vector<std::string> load_strings(const std::string &filename)
-{
-    std::ifstream fin(filename);
-    std::vector<std::string> lines;
+static std::vector<std::vector<float>> load_bvecs(const std::string& p) {
+    std::ifstream f(p, std::ios::binary);
+    if (!f) throw std::runtime_error("Cannot open: " + p);
+    std::vector<std::vector<float>> v;
+    while (f.peek() != EOF) {
+        int dim; f.read(reinterpret_cast<char*>(&dim), 4);
+        if (!f) break;
+        std::vector<uint8_t> raw(dim);
+        f.read(reinterpret_cast<char*>(raw.data()), dim);
+        std::vector<float> vec(dim);
+        for (int i = 0; i < dim; ++i) vec[i] = static_cast<float>(raw[i]);
+        v.push_back(std::move(vec));
+    }
+    return v;
+}
+
+// ivecs: same layout as fvecs but int32 values — used for gt neighbor IDs
+static std::vector<std::vector<int>> load_ivecs(const std::string& p) {
+    std::ifstream f(p, std::ios::binary);
+    if (!f) throw std::runtime_error("Cannot open: " + p);
+    std::vector<std::vector<int>> v;
+    while (f.peek() != EOF) {
+        int dim; f.read(reinterpret_cast<char*>(&dim), 4);
+        if (!f) break;
+        std::vector<int> vec(dim);
+        f.read(reinterpret_cast<char*>(vec.data()), 4 * dim);
+        v.push_back(std::move(vec));
+    }
+    return v;
+}
+
+static std::vector<std::vector<float>> load_vectors(const std::string& p,
+                                                     const std::string& fmt) {
+    if (fmt == "bvecs") return load_bvecs(p);
+    return load_fvecs(p);
+}
+
+static std::vector<std::string> load_strings(const std::string& p) {
+    std::ifstream f(p);
+    if (!f) throw std::runtime_error("Cannot open: " + p);
+    std::vector<std::string> v;
     std::string line;
-    while (std::getline(fin, line))
-        lines.push_back(line);
-    return lines;
+    while (std::getline(f, line)) v.push_back(line);
+    return v;
 }
 
-void parse_query_line(const std::string &line, std::string &regex_out, std::vector<float> &vector_out)
-{
+static bool parse_query(const std::string& line,
+                         std::string& rx, std::vector<float>& qv) {
     std::istringstream iss(line);
-    iss >> regex_out;
+    if (!(iss >> rx)) return false;
     float val;
-    while (iss >> val)
-        vector_out.push_back(val);
+    while (iss >> val) qv.push_back(val);
+    return !qv.empty();
 }
 
-void dump_gram_index(const std::unordered_map<std::string, std::set<int>> &gram_index, const std::string &filename)
-{
-    std::ofstream fout(filename);
-    for (const auto &[gram, clusters] : gram_index)
-    {
-        fout << gram << ": ";
-        for (int cid : clusters)
-            fout << cid << " ";
+static size_t rss_kb() {
+    std::ifstream f("/proc/self/status");
+    std::string line;
+    while (std::getline(f, line))
+        if (line.rfind("VmRSS:", 0) == 0) {
+            size_t kb; std::string k, u;
+            std::istringstream(line) >> k >> kb >> u;
+            return kb;
+        }
+    return 0;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Recall helper
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void report_recall(const std::vector<std::vector<int>>& preds,
+                           const std::string& gt_file, int K) {
+    if (gt_file.empty()) return;
+    try {
+        auto gt = load_results(gt_file);
+        auto [mean, _] = compute_recall(gt, preds, K);
+        std::cout << "[EVAL] Recall@" << K << " = "
+                  << mean * 100.0 << " %\n";
+    } catch (const std::exception& e) {
+        std::cerr << "[WARN] Recall skipped: " << e.what() << "\n";
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Algorithm: RegExANN (flat)
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void run_ann(
+        const std::vector<std::vector<float>>& vectors,
+        const std::vector<std::string>& strings,
+        std::ifstream& qfin, std::ofstream& fout,
+        int K, int X, int max_iter, const Options& opts) {
+
+    using Clock = std::chrono::high_resolution_clock;
+    using ms    = std::chrono::milliseconds;
+    using us    = std::chrono::microseconds;
+
+    KMeansResult km;
+    std::unordered_map<std::string, std::set<int>> gram_index;
+    PQIndex pq;
+
+    // ── Try loading pre-built index ────────────────────────────────────
+    bool loaded = false;
+    if (!opts.load_prefix.empty()) {
+        loaded = load_index(opts.load_prefix, km, gram_index, pq);
+        if (loaded) std::cout << "[INFO] Index loaded from " << opts.load_prefix << "\n";
+    }
+
+    if (!loaded) {
+        // ── Build index ───────────────────────────────────────────────
+        std::cout << "[INFO] Building index (k=" << X
+                  << ", pq_m=" << opts.pq_m
+                  << ", pq_ksub=" << opts.pq_ksub << ") …\n";
+        auto t0 = Clock::now();
+
+        km = run_kmeans(vectors, X, max_iter);
+        std::cout << "[INFO] K-means done.\n";
+
+        build_3gram_index(strings, km.assignments, gram_index);
+        std::cout << "[INFO] Trigram index: "
+                  << gram_index.size() << " trigrams.\n";
+
+        int dim   = (int)vectors[0].size();
+        int eff_m = opts.pq_m;
+        while (eff_m > 1 && dim % eff_m != 0) --eff_m;
+        if (eff_m != opts.pq_m)
+            std::cout << "[INFO] pq_m: " << opts.pq_m << " → " << eff_m << "\n";
+        int k_sub = std::min(opts.pq_ksub, (int)vectors.size());
+
+        std::cout << "[INFO] Training PQ (m=" << eff_m
+                  << ", k_sub=" << k_sub << ") …\n";
+        train_pq(pq, vectors, eff_m, k_sub, 25);
+        encode_all(pq, vectors);
+
+        auto t1 = Clock::now();
+        std::cout << "[INFO] Index built in "
+                  << std::chrono::duration_cast<ms>(t1-t0).count() << " ms.\n";
+
+        if (!opts.save_prefix.empty()) {
+            save_index(opts.save_prefix, km, gram_index, pq, dim);
+            std::cout << "[INFO] Index saved to " << opts.save_prefix << ".*\n";
+        }
+    }
+
+    std::cout << "[INFO] Memory: " << rss_kb() / 1024.0 << " MB\n";
+
+    // ── Query loop ────────────────────────────────────────────────────
+    std::string line;
+    int    qcnt = 0;
+    double t_all = 0, t_set = 0, t_clust = 0;
+    std::vector<std::vector<int>> all_preds;
+
+    while (std::getline(qfin, line)) {
+        std::string rx; std::vector<float> qv;
+        if (!parse_query(line, rx, qv)) continue;
+
+        auto qa = Clock::now();
+        auto r  = perform_search(rx, qv, gram_index,
+                                 km.centroids, km.clusters,
+                                 vectors, strings, pq, K);
+        auto qb = Clock::now();
+
+        t_all   += std::chrono::duration_cast<us>(qb-qa).count() / 1000.0;
+        t_set   += r.setop_time_ms;
+        t_clust += r.query_time_ms;
+        ++qcnt;
+
+        for (int id : r.top_ids) fout << id << " ";
         fout << "\n";
+        all_preds.push_back(r.top_ids);
     }
-    fout.close();
-    std::cerr << "[DEBUG] Dumped 3-gram index to " << filename << "\n";
+
+    if (qcnt > 0) {
+        std::cout << "[INFO] Queries          : " << qcnt          << "\n"
+                  << "[INFO] Avg total time   : " << t_all/qcnt    << " ms\n"
+                  << "[INFO] Avg set-op time  : " << t_set/qcnt    << " ms\n"
+                  << "[INFO] Avg cluster time : " << t_clust/qcnt  << " ms\n"
+                  << "[INFO] QPS              : " << 1000.0*qcnt/t_all << "\n";
+    }
+    report_recall(all_preds, opts.gt_file, K);
 }
 
-std::vector<int> run_baseline(const std::string &regex_str,
-                              const std::vector<float> &query_vec,
-                              const std::vector<std::vector<float>> &all_vectors,
-                              const std::vector<std::string> &all_strings,
-                              int K)
-{
-    std::regex pattern(regex_str, std::regex::icase); // ← 不区分大小写
-    std::priority_queue<std::pair<float, int>> pq;
+// ─────────────────────────────────────────────────────────────────────────────
+// Algorithm: Hierarchical RegExANN
+// ─────────────────────────────────────────────────────────────────────────────
 
-    for (int i = 0; i < (int)all_vectors.size(); ++i)
-    {
-        if (!std::regex_search(all_strings[i], pattern))
-            continue;
-        float dist = 0;
-        for (size_t j = 0; j < query_vec.size(); ++j)
-            dist += (query_vec[j] - all_vectors[i][j]) * (query_vec[j] - all_vectors[i][j]);
-        pq.emplace(std::sqrt(dist), i);
-        if ((int)pq.size() > K)
-            pq.pop();
-    }
+static void run_hier(
+        const std::vector<std::vector<float>>& vectors,
+        const std::vector<std::string>& strings,
+        std::ifstream& qfin, std::ofstream& fout,
+        int K, int X, int max_iter, const Options& opts) {
 
-    std::vector<int> result;
-    while (!pq.empty())
-    {
-        result.push_back(pq.top().second);
-        pq.pop();
-    }
-    std::reverse(result.begin(), result.end());
-    return result;
-}
+    using Clock = std::chrono::high_resolution_clock;
+    using us    = std::chrono::microseconds;
 
-size_t get_current_rss_kb()
-{
-    std::ifstream stat_stream("/proc/self/status");
+    int k0 = opts.k0 > 0 ? opts.k0 : std::max(2, (int)std::sqrt((double)X));
+    int k1 = std::max(1, X / k0);
+    int nprobe = opts.nprobe > 0 ? opts.nprobe : std::max(1, k0 / 2);
+
+    std::cout << "[INFO] Building hierarchical index (k0=" << k0
+              << ", k1=" << k1 << ", nprobe=" << nprobe << ") …\n";
+
+    auto hidx = build_hierarchical_index(
+        vectors, strings, k0, k1,
+        opts.pq_m, opts.pq_ksub, max_iter);
+
+    std::cout << "[INFO] Memory: " << rss_kb() / 1024.0 << " MB\n";
+
     std::string line;
-    while (std::getline(stat_stream, line))
-    {
-        if (line.rfind("VmRSS:", 0) == 0)
-        { // 开头是 VmRSS
-            std::istringstream iss(line);
-            std::string key;
-            size_t value_kb;
-            std::string unit;
-            iss >> key >> value_kb >> unit;
-            return value_kb;
-        }
+    int qcnt = 0; double t_all = 0;
+    std::vector<std::vector<int>> all_preds;
+
+    while (std::getline(qfin, line)) {
+        std::string rx; std::vector<float> qv;
+        if (!parse_query(line, rx, qv)) continue;
+
+        auto qa = Clock::now();
+        auto ids = query_hierarchical(hidx, rx, qv, vectors, strings, K, nprobe);
+        auto qb = Clock::now();
+        t_all += std::chrono::duration_cast<us>(qb-qa).count() / 1000.0;
+        ++qcnt;
+
+        for (int id : ids) fout << id << " ";
+        fout << "\n";
+        all_preds.push_back(ids);
     }
-    return 0; // not found
+
+    if (qcnt > 0)
+        std::cout << "[INFO] Queries: " << qcnt
+                  << "  Avg: " << t_all/qcnt << " ms"
+                  << "  QPS: " << 1000.0*qcnt/t_all << "\n";
+    report_recall(all_preds, opts.gt_file, K);
 }
 
-int main(int argc, char *argv[])
-{
-    if (argc < 9)
-    {
-        std::cerr << "Usage: ./ann_search <vector.fvecs> <string.txt> <query.txt> <K> <clusters> <output.txt> <max_iter> <alg=ann|baseline>\n";
+// ─────────────────────────────────────────────────────────────────────────────
+// Baseline generic loop
+// ─────────────────────────────────────────────────────────────────────────────
+
+using BaseFn = std::function<BaselineResult(
+    const std::string&, const std::vector<float>&,
+    const std::vector<std::vector<float>>&,
+    const std::vector<std::string>&, int)>;
+
+static void run_baseline_loop(
+        BaseFn fn,
+        const std::vector<std::vector<float>>& vecs,
+        const std::vector<std::string>& strs,
+        std::ifstream& qfin, std::ofstream& fout,
+        int K, const Options& opts) {
+
+    std::string line;
+    int qcnt = 0; double t_all = 0;
+    std::vector<std::vector<int>> all_preds;
+
+    while (std::getline(qfin, line)) {
+        std::string rx; std::vector<float> qv;
+        if (!parse_query(line, rx, qv)) continue;
+        auto r = fn(rx, qv, vecs, strs, K);
+        t_all += r.query_time_ms;
+        ++qcnt;
+        for (int id : r.top_ids) fout << id << " ";
+        fout << "\n";
+        all_preds.push_back(r.top_ids);
+    }
+
+    std::cout << "[INFO] Memory: " << rss_kb() / 1024.0 << " MB\n";
+    if (qcnt > 0)
+        std::cout << "[INFO] Queries: " << qcnt
+                  << "  Avg: " << t_all/qcnt << " ms"
+                  << "  QPS: " << 1000.0*qcnt/t_all << "\n";
+    report_recall(all_preds, opts.gt_file, K);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// main
+// ─────────────────────────────────────────────────────────────────────────────
+
+int main(int argc, char* argv[]) {
+    if (argc < 9) {
+        std::cerr <<
+"Usage: ./regann <vectors.fvecs> <strings.txt> <queries.txt> <K>\n"
+"               <clusters> <output.txt> <max_iter> <algorithm> [opts...]\n"
+"\n"
+"Algorithms: ann | hier | groundtruth | baseline | prefilter | postfilter\n"
+"\n"
+"Options (key=value):\n"
+"  pq_m=N         PQ subspaces              [ann/hier, default 8]\n"
+"  pq_ksub=N      PQ centroids/subspace     [ann/hier, default 256]\n"
+"  k0=N           Coarse clusters           [hier, default sqrt(clusters)]\n"
+"  nprobe=N       Coarse clusters to probe  [hier, default k0/2]\n"
+"  oversample=N   Post-filter oversample    [postfilter, default 10]\n"
+"  gt=<file>      Ground-truth for Recall@K\n"
+"  save=<prefix>  Save index after build\n"
+"  load=<prefix>  Load pre-built index\n"
+"  fmt=fvecs|bvecs  Vector file format\n";
         return 1;
     }
 
-    std::string vec_path = argv[1];
-    std::string str_path = argv[2];
-    std::string qry_path = argv[3];
-    int K = std::stoi(argv[4]);
-    int X = std::stoi(argv[5]);
-    std::string out_path = argv[6];
-    int max_iter = std::stoi(argv[7]);
-    std::string algorithm = argv[8];
+    const std::string vec_path  = argv[1];
+    const std::string str_path  = argv[2];
+    const std::string qry_path  = argv[3];
+    const int K                 = std::stoi(argv[4]);
+    const int X                 = std::stoi(argv[5]);
+    const std::string out_path  = argv[6];
+    const int max_iter          = std::stoi(argv[7]);
+    const std::string algorithm = argv[8];
 
-    auto vectors = load_fvecs(vec_path);
-    auto strings = load_strings(str_path);
+    Options opts;
+    opts.parse(argc, argv, 9);
 
-    using namespace std::chrono;
-    std::ifstream qfin(qry_path);
-    std::ofstream fout(out_path);
-    std::string line;
-    int query_count = 0;
-    double total_setop_time_ms = 0.0;
-    double total_cluster_query_time_ms = 0.0;
-    double total_query_time_ms = 0.0;
+    try {
+        auto vectors = load_vectors(vec_path, opts.fmt);
+        auto strings = load_strings(str_path);
+        if (vectors.empty()) throw std::runtime_error("No vectors loaded.");
+        if (vectors.size() != strings.size())
+            std::cerr << "[WARN] vectors/strings mismatch: "
+                      << vectors.size() << " / " << strings.size() << "\n";
 
-    std::cout << "[INFO] Loaded " << vectors.size() << " vectors and "
-              << strings.size() << " strings.\n";
+        std::cout << "[INFO] Dataset: " << vectors.size()
+                  << " vectors (dim=" << vectors[0].size()
+                  << "), " << strings.size() << " strings.\n";
 
-    if (algorithm == "ann")
-    {
-        std::cout << "[INFO] Start indexing...\n";
-        auto t1 = high_resolution_clock::now();
+        std::ifstream qfin(qry_path);
+        if (!qfin) throw std::runtime_error("Cannot open: " + qry_path);
+        std::ofstream fout(out_path);
+        if (!fout) throw std::runtime_error("Cannot write: " + out_path);
 
-        auto kmeans_result = run_kmeans(vectors, X, max_iter);
-        // dump_cluster_assignments(kmeans_result.clusters, "./debug/cluster_assignments.txt");
+        if (algorithm == "ann") {
+            run_ann(vectors, strings, qfin, fout, K, X, max_iter, opts);
 
-        std::unordered_map<std::string, std::set<int>> gram_index;
-        build_3gram_index(strings, kmeans_result.assignments, gram_index);
-        // dump_gram_index(gram_index, "./debug/debug_gram_index.txt");
+        } else if (algorithm == "hier") {
+            run_hier(vectors, strings, qfin, fout, K, X, max_iter, opts);
 
-        auto t2 = high_resolution_clock::now();
-        auto indexing_duration = duration_cast<milliseconds>(t2 - t1).count();
-        std::cout << "[INFO] Indexing completed in " << indexing_duration << " ms.\n";
-        size_t mem_kb = get_current_rss_kb();
-        std::cout << "[INFO] Memory usage: " << mem_kb / 1024.0 << " MB\n";
+        } else if (algorithm == "groundtruth" || algorithm == "baseline") {
+            std::cout << "[INFO] Full-scan exact search …\n";
+            run_baseline_loop(
+                [](const std::string& rx, const std::vector<float>& qv,
+                   const std::vector<std::vector<float>>& v,
+                   const std::vector<std::string>& s, int k){
+                    return run_fullscan(rx, qv, v, s, k); },
+                vectors, strings, qfin, fout, K, opts);
 
-        while (std::getline(qfin, line))
-        {
-            std::string regex_str;
-            std::vector<float> query_vec;
-            parse_query_line(line, regex_str, query_vec);
+        } else if (algorithm == "prefilter") {
+            std::cout << "[INFO] Pre-filter baseline …\n";
+            run_baseline_loop(
+                [](const std::string& rx, const std::vector<float>& qv,
+                   const std::vector<std::vector<float>>& v,
+                   const std::vector<std::string>& s, int k){
+                    return run_prefilter(rx, qv, v, s, k); },
+                vectors, strings, qfin, fout, K, opts);
 
-            auto q_start = high_resolution_clock::now();
+        } else if (algorithm == "postfilter") {
+            int ov = opts.oversample;
+            std::cout << "[INFO] Post-filter baseline (oversample="
+                      << ov << ") …\n";
+            run_baseline_loop(
+                [ov](const std::string& rx, const std::vector<float>& qv,
+                     const std::vector<std::vector<float>>& v,
+                     const std::vector<std::string>& s, int k){
+                    return run_postfilter(rx, qv, v, s, k, ov); },
+                vectors, strings, qfin, fout, K, opts);
 
-            auto result = perform_search(regex_str, query_vec, gram_index,
-                                         kmeans_result.centroids,
-                                         kmeans_result.clusters,
-                                         vectors, strings, 10 * K);
-
-            auto q_end = high_resolution_clock::now();
-            total_query_time_ms += duration_cast<microseconds>(q_end - q_start).count() / 1000.0;
-            query_count++;
-
-            total_setop_time_ms += result.setop_time_ms;
-            total_cluster_query_time_ms += result.query_time_ms;
-
-            for (int id : result.top_ids)
-                fout << id << " ";
-            fout << "\n";
+        } else {
+            std::cerr << "[ERROR] Unknown algorithm: " << algorithm << "\n";
+            return 1;
         }
-    }
-    else if (algorithm == "baseline")
-    {
-        std::cout << "[INFO] Running baseline full scan...\n";
-        while (std::getline(qfin, line))
-        {
-            std::string regex_str;
-            std::vector<float> query_vec;
-            parse_query_line(line, regex_str, query_vec);
-
-            auto q_start = high_resolution_clock::now();
-            auto result = run_baseline(regex_str, query_vec, vectors, strings, K);
-            auto q_end = high_resolution_clock::now();
-            total_query_time_ms += duration_cast<microseconds>(q_end - q_start).count() / 1000.0;
-            query_count++;
-
-            for (int id : result)
-                fout << id << " ";
-            fout << "\n";
-        }
-        size_t mem_kb = get_current_rss_kb();
-        std::cout << "[INFO] Memory usage: " << mem_kb / 1024.0 << " MB\n";
-    }
-    else
-    {
-        std::cerr << "[ERROR] Unknown algorithm: " << algorithm << "\n";
+    } catch (const std::exception& e) {
+        std::cerr << "[ERROR] " << e.what() << "\n";
         return 1;
-    }
-
-    std::cout << "[INFO] Average query time: "
-              << (total_query_time_ms / query_count) << " ms over "
-              << query_count << " queries.\n";
-
-    if (algorithm == "ann")
-    {
-        std::cout << "[INFO] Average set operation time: "
-                  << (total_setop_time_ms / query_count) << " ms\n";
-        std::cout << "[INFO] Average cluster query time: "
-                  << (total_cluster_query_time_ms / query_count) << " ms\n";
     }
     return 0;
 }

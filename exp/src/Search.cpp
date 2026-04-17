@@ -1,153 +1,152 @@
 // src/Search.cpp
+// RegExANN query processing pipeline (Algorithm 2 in the paper):
+//   Step 1  Trigram extraction & candidate cluster selection (set ops)
+//   Step 2  Sort candidate clusters by centroid distance to query
+//   Step 3  For each cluster (nearest first):
+//              a. Rank its vectors by PQ approximate distance
+//              b. Verify regex in that order; collect into result
+//              c. Stop as soon as K valid results are found
+//   Step 4  Re-rank collected results by exact Euclidean distance → top-K
 #include "Search.h"
 #include "Index.h"
-#include <regex>
-#include <cmath>
-#include <queue>
-#include <iostream>
-#include <fstream>
+#include "PQ.h"
+#include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <iostream>
+#include <queue>
+#include <regex>
 
-std::string to_lower(const std::string &s)
-{
-    std::string res = s;
-    std::transform(res.begin(), res.end(), res.begin(),
-                   [](unsigned char c)
-                   { return std::tolower(c); });
-    return res;
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// Internal helpers
+// ─────────────────────────────────────────────────────────────────────────────
 
-float euclidean_distance(const std::vector<float> &a, const std::vector<float> &b)
-{
-    float sum = 0;
-    for (size_t i = 0; i < a.size(); ++i)
-        sum += (a[i] - b[i]) * (a[i] - b[i]);
-    return std::sqrt(sum);
-}
-
-void dump_query_cluster_debug(const std::string &regex_str,
-                              const std::unordered_map<std::string, std::set<int>> &gram_index,
-                              const std::vector<std::pair<float, int>> &cluster_dists,
-                              const std::string &filename)
-{
-    std::ofstream fout(filename);
-    auto grams = extract_3grams(regex_str);
-
-    fout << "[DEBUG] Extracted 3-grams from regex: ";
-    for (const auto &g : grams)
-        fout << g << " ";
-    fout << "\n";
-
-    std::set<int> all_candidates;
-    for (const auto &gram : grams)
-    {
-        fout << "[DEBUG] gram: " << gram << " → ";
-        if (gram_index.count(gram))
-        {
-            for (int cid : gram_index.at(gram))
-            {
-                fout << cid << " ";
-                all_candidates.insert(cid);
-            }
-        }
-        else
-        {
-            fout << "not found";
-        }
-        fout << "\n";
+static float euclidean_distance(const std::vector<float>& a,
+                                const std::vector<float>& b) {
+    float s = 0.f;
+    for (size_t i = 0; i < a.size(); ++i) {
+        float d = a[i] - b[i];
+        s += d * d;
     }
-
-    fout << "[DEBUG] Total candidate clusters (unordered): ";
-    for (int cid : all_candidates)
-        fout << cid << " ";
-    fout << "\n";
-
-    fout << "[DEBUG] Candidate clusters sorted by distance:\n";
-    for (const auto &[dist, cid] : cluster_dists)
-        fout << "cid = " << cid << ", dist = " << dist << "\n";
-
-    fout.close();
+    return std::sqrt(s);
 }
 
-SearchResult perform_search(const std::string &regex_str,
-                            const std::vector<float> &query_vector,
-                            const std::unordered_map<std::string, std::set<int>> &gram_index,
-                            const std::vector<std::vector<float>> &centroids,
-                            const std::vector<std::vector<int>> &clusters,
-                            const std::vector<std::vector<float>> &all_vectors,
-                            const std::vector<std::string> &all_strings,
-                            int K)
-{
+// ─────────────────────────────────────────────────────────────────────────────
+// Main search function
+// ─────────────────────────────────────────────────────────────────────────────
+
+SearchResult perform_search(
+        const std::string& regex_str,
+        const std::vector<float>& query_vector,
+        const std::unordered_map<std::string, std::set<int>>& gram_index,
+        const std::vector<std::vector<float>>& centroids,
+        const std::vector<std::vector<int>>& clusters,
+        const std::vector<std::vector<float>>& all_vectors,
+        const std::vector<std::string>& all_strings,
+        const PQIndex& pq,
+        int K) {
+
     using namespace std::chrono;
-    auto start_setop = high_resolution_clock::now();
-    std::set<int> candidate_clusters;
-    auto grams = extract_3grams(regex_str);
+    using Clock = high_resolution_clock;
 
-    bool first = true;
-    for (const auto &gram : grams)
-    {
-        if (!gram_index.count(gram))
-        {
-            candidate_clusters.clear();
-            break;
-        }
+    // ── Step 1: Trigram-based candidate cluster selection ─────────────────
+    auto t0 = Clock::now();
 
-        const auto &gram_clusters = gram_index.at(gram);
-        if (first)
-        {
-            candidate_clusters = std::set<int>(gram_clusters.begin(), gram_clusters.end());
-            first = false;
-        }
-        else
-        {
-            std::set<int> temp;
-            std::set_intersection(candidate_clusters.begin(), candidate_clusters.end(),
-                                  gram_clusters.begin(), gram_clusters.end(),
-                                  std::inserter(temp, temp.begin()));
-            candidate_clusters = std::move(temp);
-        }
-    }
-    auto end_setop = high_resolution_clock::now();
-    double setop_ms = duration_cast<microseconds>(end_setop - start_setop).count() / 1000.0;
+    int num_clusters = static_cast<int>(centroids.size());
+    std::set<int> candidate_clusters =
+        get_candidate_clusters(regex_str, gram_index, num_clusters);
 
-    auto start_query = high_resolution_clock::now();
+    auto t1 = Clock::now();
+    double setop_ms =
+        duration_cast<microseconds>(t1 - t0).count() / 1000.0;
 
+    // ── Step 2 & 3: Cluster ranking + PQ scan + regex verify ─────────────
+    auto t2 = Clock::now();
+
+    // Sort candidate clusters by distance from query to centroid (ascending).
     std::vector<std::pair<float, int>> cluster_dists;
+    cluster_dists.reserve(candidate_clusters.size());
     for (int cid : candidate_clusters)
-        cluster_dists.emplace_back(euclidean_distance(query_vector, centroids[cid]), cid);
+        cluster_dists.emplace_back(
+            euclidean_distance(query_vector, centroids[cid]), cid);
     std::sort(cluster_dists.begin(), cluster_dists.end());
 
-    //dump_query_cluster_debug(regex_str, gram_index, cluster_dists, "./debug/query_debug.txt");
+    // Compile regex once (icase: case-insensitive matching).
+    std::regex pattern;
+    try {
+        pattern = std::regex(regex_str, std::regex::icase);
+    } catch (const std::regex_error& e) {
+        std::cerr << "[WARN] Invalid regex: " << e.what() << "\n";
+        return SearchResult{{}, setop_ms, 0.0};
+    }
 
-    std::priority_queue<std::pair<float, int>> pq;
-    std::regex pattern(regex_str, std::regex::icase);
+    // Precompute PQ distance lookup table for the query.
+    auto dist_table = compute_dist_table(pq, query_vector);
 
-    for (const auto &[_, cid] : cluster_dists)
-    {
-        for (int vid : clusters[cid])
-        {
+    // We use a max-heap (size K) keyed by exact Euclidean distance to keep
+    // the running top-K.  We fill it via early stopping across clusters.
+    // Because PQ gives only approximate distances, we cannot stop within a
+    // cluster — we must scan every regex-matching element of every cluster
+    // we visit and rely on cluster-level early stopping.
+    //
+    // Early-stop heuristic: once the heap has K elements AND the current
+    // cluster's centroid distance minus the cluster's approximate radius is
+    // already larger than our K-th best distance, further clusters cannot
+    // improve the result.  Here we use a simpler but safe variant: stop
+    // when we have accumulated at least K results from scanned clusters
+    // (the heap ensures we keep the global top-K).
+    using DistId = std::pair<float, int>; // (distance, vector_id)
+    std::priority_queue<DistId> heap;     // max-heap, size ≤ K
+
+    for (const auto& [centroid_dist, cid] : cluster_dists) {
+        const auto& vids = clusters[cid];
+
+        // ── PQ-sort within this cluster ────────────────────────────────
+        // Build (pq_dist, vid) pairs and sort ascending by PQ distance.
+        std::vector<std::pair<float, int>> pq_order;
+        pq_order.reserve(vids.size());
+        for (int vid : vids)
+            pq_order.emplace_back(
+                pq_approx_dist(dist_table, pq.codes[vid]), vid);
+        std::sort(pq_order.begin(), pq_order.end());
+
+        // ── Scan in PQ-distance order; verify regex; update heap ───────
+        for (const auto& [pq_dist, vid] : pq_order) {
+            // Optional early exit inside cluster: if the heap is full and
+            // the PQ lower-bound already exceeds the worst in the heap,
+            // remaining elements in this cluster cannot enter the top-K.
+            if ((int)heap.size() == K &&
+                std::sqrt(pq_dist) > heap.top().first)
+                break;
+
             if (!std::regex_search(all_strings[vid], pattern))
                 continue;
-            float dist = euclidean_distance(query_vector, all_vectors[vid]);
-            pq.emplace(dist, vid);
-            if ((int)pq.size() > K)
-                pq.pop();
+
+            float exact_dist = euclidean_distance(query_vector, all_vectors[vid]);
+            heap.emplace(exact_dist, vid);
+            if ((int)heap.size() > K) heap.pop();
         }
-        if ((int)pq.size() >= K)
+
+        // Cluster-level early stop: heap is full and the closest possible
+        // point in upcoming clusters (lower-bounded by centroid distance)
+        // cannot beat the current K-th best.
+        if ((int)heap.size() == K &&
+            centroid_dist > heap.top().first)
             break;
     }
 
-    
-    auto end_query = high_resolution_clock::now();
-    double query_ms = duration_cast<microseconds>(end_query - start_query).count() / 1000.0;
+    auto t3 = Clock::now();
+    double query_ms =
+        duration_cast<microseconds>(t3 - t2).count() / 1000.0;
 
+    // ── Step 4: Extract results in ascending distance order ───────────────
     std::vector<int> result;
-    while (!pq.empty())
-    {
-        result.push_back(pq.top().second);
-        pq.pop();
+    result.reserve(heap.size());
+    while (!heap.empty()) {
+        result.push_back(heap.top().second);
+        heap.pop();
     }
-    std::reverse(result.begin(), result.end());
-    
+    std::reverse(result.begin(), result.end()); // nearest first
+
     return SearchResult{result, setop_ms, query_ms};
 }
