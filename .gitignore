@@ -11,4 +11,4 @@ dataset/dblp
 build
 exp/build
 .vscode
-result
+results

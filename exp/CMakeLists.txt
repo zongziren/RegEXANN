@@ -13,14 +13,16 @@ set(CMAKE_CXX_FLAGS_DEBUG   "-g -fsanitize=address")
 
 include_directories(include)
 
-# Shared sources: everything in src/ except the *_main.cpp entry points
+# All shared library sources (everything except *_main.cpp and main.cpp)
 set(LIB_SRCS
     src/Baseline.cpp
     src/Eval.cpp
+    src/GraphIndex.cpp
     src/HierarchicalIndex.cpp
     src/Index.cpp
     src/KMeans.cpp
     src/PQ.cpp
+    src/RegexParser.cpp
     src/Search.cpp
     src/Serialize.cpp
 )
