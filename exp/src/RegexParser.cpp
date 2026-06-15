@@ -7,24 +7,6 @@
 #include <cctype>
 
 // ─────────────────────────────────────────────────────────────────────────────
-// TrigramVocab
-// ─────────────────────────────────────────────────────────────────────────────
-
-int TrigramVocab::intern(const std::string& gram) {
-    auto it = gram_to_id.find(gram);
-    if (it != gram_to_id.end()) return it->second;
-    int id = (int)id_to_gram.size();
-    gram_to_id[gram] = id;
-    id_to_gram.push_back(gram);
-    return id;
-}
-
-int TrigramVocab::lookup(const std::string& gram) const {
-    auto it = gram_to_id.find(gram);
-    return (it == gram_to_id.end()) ? -1 : it->second;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // DNF helpers
 // ─────────────────────────────────────────────────────────────────────────────
 

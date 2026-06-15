@@ -477,10 +477,12 @@ static void run_graph(
         auto tp1 = Clock::now();
         t_parse += std::chrono::duration_cast<us>(tp1-tp0).count() / 1000.0;
 
-        // Graph search
+        // Step 2: trigram filter → candidate node IDs
         auto ts0 = Clock::now();
+        auto candidates = trigram_filter_nodes(idx, dnf);
+        // Step 3+4: graph-guided K-NN within candidates + regex verify
         std::vector<int> result = search_graph(
-            idx, qv, rx, dnf, K, opts.graph_ef_search);
+            idx, qv, rx, candidates, K, opts.graph_ef_search);
         auto ts1 = Clock::now();
         t_search += std::chrono::duration_cast<us>(ts1-ts0).count() / 1000.0;
 

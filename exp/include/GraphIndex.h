@@ -1,82 +1,83 @@
 // include/GraphIndex.h
-// Trigram-aware NSW graph index for regex-filtered ANN search.
+// Hybrid Graph-Trigram index for regex-filtered ANN search.
 //
-// Core idea:
-//   Each node stores a vector, a string, and its trigram set (as IDs).
-//   Each edge stores the set of trigram IDs shared by its two endpoints.
-//   The graph is built by merging per-trigram NSW sub-graphs:
-//     for each trigram t, build an NSW among all nodes containing t,
-//     then collapse multi-edges between the same pair of nodes into one
-//     edge whose label = union of all shared trigrams.
+// Design (solving the sparse-trigram recall problem):
 //
-// Query (for one conjunction group, i.e. one AND-of-trigrams):
-//   1. Pick a random entry node that contains at least one query trigram.
-//   2. Greedy NSW traversal: from the candidate set, expand only via
-//      edges whose label intersects the query trigram set (at least one
-//      common trigram).  Score = Euclidean distance to query vector.
-//   3. Stop when no neighbor improves the best distance (local optimum).
-//   4. Return the top-K nodes seen during traversal that satisfy the
-//      full regex (verified by std::regex_search).
+//   The core insight: the two tasks are fundamentally different:
+//     - String filtering: "does this string match the regex?"
+//       → Solved by trigram inverted index at NODE level (not cluster level).
+//         Any matching string MUST contain certain trigrams.
+//         The index gives exact candidate node sets, not approximations.
+//     - Vector ANN: "which candidate is closest to query vector?"
+//       → Solved by NSW graph navigation within the candidate set.
 //
-// For a full query (DNF = OR of conjunctions):
-//   Run the above once per conjunction, merge results, deduplicate,
-//   re-rank by exact distance, return top-K.
+//   Index structure:
+//     1. NSW graph on all N nodes (backbone for global connectivity).
+//        Edge label = sorted intersection of the two endpoints' trigram sets.
+//     2. Node-level trigram inverted index: gram → sorted list of node IDs.
+//        (This differs from ann's cluster-level index — here it maps to
+//         individual nodes, so regex filtering is exact with no false positives
+//         at the candidate selection stage.)
+//
+//   Query pipeline:
+//     Step 1 — Regex → DNF (same recursive-descent parser as RegexParser.cpp)
+//     Step 2 — DNF evaluated on node-level trigram index:
+//                 ∩ per conjunction, ∪ across conjunctions
+//               → C_regex = set of node IDs that MUST contain matching strings
+//               (may still have false positives from trigram approximation,
+//                but far fewer than cluster-level filtering)
+//     Step 3 — If |C_regex| ≤ EXACT_THRESH: exact K-NN within C_regex
+//              Else: graph-guided search restricted to C_regex
+//     Step 4 — Regex verify remaining candidates, return top-K by exact dist.
+//
+//   Why this works on sparse-trigram datasets:
+//     The node-level index guarantees we only look at nodes whose strings
+//     contain the required trigrams — even if each trigram is rare (appears
+//     in 1-2 nodes), the intersection of posting lists is still exact.
+//     The graph then efficiently finds the nearest among those candidates.
 #pragma once
 
-#include <cstdint>
 #include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 // ── Trigram vocabulary ────────────────────────────────────────────────────────
-// Maps 3-char strings ↔ compact integer IDs.
 struct TrigramVocab {
     std::unordered_map<std::string, int> gram_to_id;
     std::vector<std::string>             id_to_gram;
-
-    // Insert gram if absent; return its ID.
     int intern(const std::string& gram);
-    // Return ID or -1 if not present.
     int lookup(const std::string& gram) const;
     int size() const { return (int)id_to_gram.size(); }
 };
 
-// ── Graph structures ──────────────────────────────────────────────────────────
-
+// ── Graph node / edge ─────────────────────────────────────────────────────────
 struct Edge {
-    int  dst;                    // neighbour node ID
-    std::vector<int> trigrams;   // shared trigram IDs (sorted)
+    int              dst;
+    std::vector<int> trigrams; // sorted shared trigram IDs (may be empty = backbone)
 };
 
 struct Node {
-    int               id;
-    std::vector<float> vec;      // embedding vector
-    std::string        str;      // original string
-    std::vector<int>   trigrams; // trigram IDs of str (sorted)
+    int                id;
+    std::vector<float> vec;
+    std::string        str;
+    std::vector<int>   trigrams; // sorted trigram IDs of str
     std::vector<Edge>  neighbors;
 };
 
-// ── Index ─────────────────────────────────────────────────────────────────────
-
+// ── Hybrid index ──────────────────────────────────────────────────────────────
 struct GraphIndex {
-    TrigramVocab              vocab;
-    std::vector<Node>         nodes;
+    TrigramVocab   vocab;
+    std::vector<Node> nodes;
 
-    // trigram_id → list of node IDs that contain it
-    // Used to pick random entry points at query time.
+    // Node-level inverted index: trigram_id → sorted list of node IDs
     std::unordered_map<int, std::vector<int>> trigram_to_nodes;
 
-    // Build parameters
-    int M        = 16;  // max neighbours per node in NSW
-    int ef_build = 64;  // candidate set size during construction
+    int M        = 16;
+    int ef_build = 64;
 };
 
 // ── Build ─────────────────────────────────────────────────────────────────────
-
-// Construct the trigram-aware NSW graph from vectors + strings.
-//   M        : max out-degree per node
-//   ef_build : beam width during NSW insertion
 GraphIndex build_graph_index(
     const std::vector<std::vector<float>>& vectors,
     const std::vector<std::string>&        strings,
@@ -85,24 +86,37 @@ GraphIndex build_graph_index(
 
 // ── Query ─────────────────────────────────────────────────────────────────────
 
-// One conjunction group: a set of trigram IDs that must ALL be present.
-// Traverse the graph from a random entry node that contains at least one
-// of these trigrams, following only edges labelled with at least one of them.
-// Returns up to ef_search candidate node IDs (not yet regex-verified).
-std::vector<int> search_conjunction(
-    const GraphIndex&      idx,
-    const std::vector<float>& query_vec,
-    const std::vector<int>&   conj_trigrams,  // AND-group trigram IDs
-    int                    ef_search,
-    unsigned int           seed = 42);
+// Step 2: evaluate DNF on node-level inverted index.
+// Returns sorted list of candidate node IDs.
+// Each element of dnf is an AND-group (conjunction of trigram IDs).
+// Empty inner vector means unconstrained (return all nodes).
+std::vector<int> trigram_filter_nodes(
+    const GraphIndex&                    idx,
+    const std::vector<std::vector<int>>& dnf);
 
-// Full query: DNF = list of conjunctions (each a list of trigram IDs).
-// For each conjunction, run search_conjunction, merge results,
-// verify regex, re-rank by exact distance, return top-K node IDs.
+// Step 3+4: find top-K nearest among candidates that match regex.
+// Uses graph navigation if |candidates| > EXACT_THRESH, else exact scan.
 std::vector<int> search_graph(
-    const GraphIndex&                      idx,
-    const std::vector<float>&              query_vec,
-    const std::string&                     regex_str,
-    const std::vector<std::vector<int>>&   dnf,   // OR of AND-groups
-    int                                    K,
-    int                                    ef_search = 64);
+    const GraphIndex&        idx,
+    const std::vector<float>& query_vec,
+    const std::string&        regex_str,
+    const std::vector<int>&   candidates, // from trigram_filter_nodes
+    int K,
+    int ef_search = 64);
+
+// Convenience: full pipeline (trigram filter + graph search).
+std::vector<int> search_graph_full(
+    const GraphIndex&                    idx,
+    const std::vector<float>&            query_vec,
+    const std::string&                   regex_str,
+    const std::vector<std::vector<int>>& dnf,
+    int K,
+    int ef_search = 64);
+
+// Legacy signatures kept for RegexParser compatibility
+std::vector<int> search_conjunction(
+    const GraphIndex&        idx,
+    const std::vector<float>& query_vec,
+    const std::vector<int>&   conj_trigrams,
+    int ef_search,
+    unsigned int seed = 42);
