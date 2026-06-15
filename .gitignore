@@ -13,4 +13,4 @@ exp/build
 .vscode
 results
 
-1.sh
+*.sh
