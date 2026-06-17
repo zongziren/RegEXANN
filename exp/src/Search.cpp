@@ -1,17 +1,28 @@
 // src/Search.cpp
-// RegExANN query processing pipeline (Algorithm 2 in the paper):
-//   Step 1  Trigram extraction & candidate cluster selection (set ops)
-//   Step 2  Sort candidate clusters by centroid distance to query
-//   Step 3  For each cluster (nearest first):
-//              a. Rank its vectors by PQ approximate distance
-//              b. Verify regex in that order; collect into ef-pool
-//              c. Stop as soon as ef valid results are collected
-//   Step 4  Re-rank ef-pool by exact Euclidean distance → top-K
+// RegExANN query processing pipeline:
 //
-// The `ef` parameter (ef >= K) controls the recall/speed trade-off:
-//   ef == K  → original behaviour, stops as soon as K results found
-//   ef >  K  → collects more candidates before stopping, improving recall
-//              at the cost of extra regex checks and distance computations.
+//   Step 1  Trigram-based candidate cluster selection
+//   Step 2  Sort candidate clusters by exact centroid distance (ascending)
+//   Step 3  For each cluster (nearest-centroid first, up to nprobe clusters):
+//             a. Compute PQ approximate distance for every vector in cluster
+//             b. partial_sort to bring the ef-nearest (by PQ) to the front
+//             c. Walk in PQ-distance order:
+//                  - PQ within-cluster early-exit: if heap full and
+//                    pq_dist > worst pq_dist in heap → skip rest of cluster
+//                  - regex check: skip non-matching vectors
+//                  - collect matching vectors into ef-pool (keyed by PQ dist)
+//             d. Cluster-level early-exit (only when nprobe=0):
+//                  heap full AND next centroid's exact distance >
+//                  sqrt(worst PQ dist in heap) * expansion_factor
+//                  This is a heuristic; nprobe is the reliable hard limit.
+//   Step 4  Exact rerank: compute true L2 for ef survivors → return top-K
+//
+// Parameters:
+//   ef      >= K: candidate pool size. Larger ef → higher recall, slower.
+//           ef=K is the original behaviour (stop as soon as K matches found).
+//   nprobe  > 0: hard limit on clusters to scan (fast, lower recall).
+//           = 0: scan all candidate clusters, use heuristic early-exit.
+
 #include "Search.h"
 #include "Index.h"
 #include "PQ.h"
@@ -23,21 +34,21 @@
 #include <regex>
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Internal helpers
+// Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-static float euclidean_distance(const std::vector<float>& a,
-                                const std::vector<float>& b) {
+static float sq_l2(const std::vector<float>& a, const std::vector<float>& b) {
     float s = 0.f;
-    for (size_t i = 0; i < a.size(); ++i) {
-        float d = a[i] - b[i];
-        s += d * d;
-    }
-    return std::sqrt(s);
+    for (size_t i = 0; i < a.size(); ++i) { float d = a[i]-b[i]; s += d*d; }
+    return s;
+}
+
+static float l2(const std::vector<float>& a, const std::vector<float>& b) {
+    return std::sqrt(sq_l2(a, b));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Main search function
+// Main search
 // ─────────────────────────────────────────────────────────────────────────────
 
 SearchResult perform_search(
@@ -50,39 +61,32 @@ SearchResult perform_search(
         const std::vector<std::string>& all_strings,
         const PQIndex& pq,
         int K,
-        int ef) {
+        int ef,
+        int nprobe) {
 
-    // ef is the candidate pool size; must be >= K.
-    // ef == 0 (default) means use K (original behaviour).
     if (ef <= 0) ef = K;
     if (ef < K)  ef = K;
 
-    using namespace std::chrono;
-    using Clock = high_resolution_clock;
+    using Clock = std::chrono::high_resolution_clock;
+    using us    = std::chrono::microseconds;
 
-    // ── Step 1: Trigram-based candidate cluster selection ─────────────────
+    // ── Step 1: Trigram candidate cluster selection ───────────────────────
     auto t0 = Clock::now();
-
     int num_clusters = static_cast<int>(centroids.size());
     std::set<int> candidate_clusters =
         get_candidate_clusters(regex_str, gram_index, num_clusters);
+    double setop_ms = std::chrono::duration_cast<us>(Clock::now()-t0).count()/1000.0;
 
-    auto t1 = Clock::now();
-    double setop_ms =
-        duration_cast<microseconds>(t1 - t0).count() / 1000.0;
-
-    // ── Step 2 & 3: Cluster ranking + PQ scan + regex verify ─────────────
+    // ── Step 2: Sort candidate clusters by exact centroid distance ────────
     auto t2 = Clock::now();
 
-    // Sort candidate clusters by distance from query to centroid (ascending).
-    std::vector<std::pair<float, int>> cluster_dists;
+    std::vector<std::pair<float,int>> cluster_dists; // (centroid_dist, cid)
     cluster_dists.reserve(candidate_clusters.size());
     for (int cid : candidate_clusters)
-        cluster_dists.emplace_back(
-            euclidean_distance(query_vector, centroids[cid]), cid);
+        cluster_dists.emplace_back(l2(query_vector, centroids[cid]), cid);
     std::sort(cluster_dists.begin(), cluster_dists.end());
 
-    // Compile regex once (icase: case-insensitive matching).
+    // Compile regex once
     std::regex pattern;
     try {
         pattern = std::regex(regex_str, std::regex::icase);
@@ -91,81 +95,104 @@ SearchResult perform_search(
         return SearchResult{{}, setop_ms, 0.0};
     }
 
-    // Precompute PQ distance lookup table for the query.
+    // Precompute PQ lookup table for this query
     auto dist_table = compute_dist_table(pq, query_vector);
 
-    // We use a max-heap keyed by exact Euclidean distance, capped at size ef.
-    // This collects the ef nearest regex-matching candidates across all
-    // visited clusters.  After scanning, we drain the top-K from it.
+    // ── Step 3: Scan clusters nearest-first ──────────────────────────────
     //
-    // Early-stop logic (per cluster-level):
-    //   Once we have ef candidates AND the current cluster's centroid distance
-    //   already exceeds the ef-th best exact distance, no future cluster can
-    //   contribute to the top-K result, so we stop.
+    // ef-pool: max-heap of (pq_sq_dist, vid), size ≤ ef.
+    // All distances inside this heap are PQ squared distances.
+    // They are comparable with each other (same space).
+    // The heap gives us the ef best-by-PQ regex-matching candidates seen so far.
     //
-    // Early-stop logic (within a cluster, PQ-level):
-    //   If the heap has ef elements and the PQ lower-bound of the next
-    //   candidate already exceeds the ef-th best exact distance, the rest
-    //   of this cluster cannot enter the pool either.
-    using DistId = std::pair<float, int>; // (distance, vector_id)
-    std::priority_queue<DistId> heap;     // max-heap, size ≤ ef
+    // Within-cluster early-exit (correct):
+    //   pq_dist (candidate) > heap.top().pq_dist (worst in pool)
+    //   → candidate cannot enter pool → skip rest of cluster (PQ order)
+    //
+    // Cluster-level early-exit (heuristic, only when nprobe=0):
+    //   next_centroid_dist² > heap.top().pq_dist * slack
+    //   Rationale: PQ underestimates true distance. If even the centroid of
+    //   the next cluster is already farther than our current worst PQ estimate
+    //   (with a slack factor to account for PQ error), further clusters are
+    //   unlikely to contribute. This is NOT a correctness guarantee; use
+    //   nprobe for a hard limit.
+    //   slack = 1.0 → aggressive (may miss some results, lower recall)
+    //   slack = 2.0 → conservative (safer, closer to scanning all clusters)
+    constexpr float EARLY_STOP_SLACK = 1.5f;
 
-    for (const auto& [centroid_dist, cid] : cluster_dists) {
+    using PqId = std::pair<float,int>; // (pq_sq_dist, vid)
+    std::priority_queue<PqId> pq_heap; // max-heap, size ≤ ef
+
+    int scanned = 0;
+    for (int ci = 0; ci < (int)cluster_dists.size(); ++ci) {
+        const auto [centroid_dist, cid] = cluster_dists[ci];
+
+        // Hard cluster limit
+        if (nprobe > 0 && scanned >= nprobe) break;
+        ++scanned;
+
         const auto& vids = clusters[cid];
 
-        // ── PQ-sort within this cluster ────────────────────────────────
-        std::vector<std::pair<float, int>> pq_order;
+        // ── PQ distances for this cluster ──────────────────────────────
+        std::vector<PqId> pq_order;
         pq_order.reserve(vids.size());
         for (int vid : vids)
-            pq_order.emplace_back(
-                pq_approx_dist(dist_table, pq.codes[vid]), vid);
-        std::sort(pq_order.begin(), pq_order.end());
+            pq_order.emplace_back(pq_approx_dist(dist_table, pq.codes[vid]), vid);
 
-        // ── Scan in PQ-distance order; verify regex; update ef-heap ───
+        // partial_sort: only sort the first min(ef, size) elements.
+        // The rest will be pruned by within-cluster early-exit.
+        size_t sort_n = std::min(pq_order.size(), (size_t)ef);
+        std::partial_sort(pq_order.begin(), pq_order.begin()+sort_n, pq_order.end());
+
+        // ── Scan in PQ order; regex check; update ef-pool ─────────────
         for (const auto& [pq_dist, vid] : pq_order) {
-            // Within-cluster PQ early exit: heap is full at ef and PQ
-            // lower-bound already beats worst in heap.
-            if ((int)heap.size() == ef &&
-                std::sqrt(pq_dist) > heap.top().first)
+            // Within-cluster early-exit: all distances in same space (PQ sq)
+            if ((int)pq_heap.size() == ef && pq_dist > pq_heap.top().first)
                 break;
 
             if (!std::regex_search(all_strings[vid], pattern))
                 continue;
 
-            float exact_dist = euclidean_distance(query_vector, all_vectors[vid]);
-            heap.emplace(exact_dist, vid);
-            if ((int)heap.size() > ef) heap.pop();
+            pq_heap.emplace(pq_dist, vid);
+            if ((int)pq_heap.size() > ef) pq_heap.pop();
         }
 
-        // Cluster-level early stop: ef candidates collected AND centroid of
-        // next cluster is already farther than the ef-th best we have.
-        if ((int)heap.size() == ef &&
-            centroid_dist > heap.top().first)
-            break;
+        // ── Cluster-level heuristic early-exit (nprobe=0 only) ────────
+        // Only trigger when pool is full (ef results collected).
+        // Compare next centroid's exact squared distance against the worst
+        // PQ squared distance in the pool (with slack for PQ error).
+        if (nprobe == 0 &&
+            (int)pq_heap.size() == ef &&
+            ci + 1 < (int)cluster_dists.size()) {
+
+            float next_cd    = cluster_dists[ci+1].first; // exact centroid dist
+            float next_cd_sq = next_cd * next_cd;         // exact centroid dist²
+            float worst_pq   = pq_heap.top().first;       // PQ sq dist (approx)
+
+            // next centroid is farther than our worst candidate (with slack).
+            // PQ underestimates, so worst_pq * slack compensates for PQ error.
+            if (next_cd_sq > worst_pq * EARLY_STOP_SLACK)
+                break;
+        }
     }
 
-    auto t3 = Clock::now();
-    double query_ms =
-        duration_cast<microseconds>(t3 - t2).count() / 1000.0;
+    double query_ms = std::chrono::duration_cast<us>(Clock::now()-t2).count()/1000.0;
 
-    // ── Step 4: Extract top-K from ef-pool in ascending distance order ────
-    // Drain the max-heap; discard entries beyond K.
+    // ── Step 4: Exact rerank ef survivors → top-K ────────────────────────
+    // Drain pq_heap → compute exact L2 for each → sort → take top-K.
+    using DistId = std::pair<float,int>;
     std::vector<DistId> pool;
-    pool.reserve(heap.size());
-    while (!heap.empty()) {
-        pool.push_back(heap.top());
-        heap.pop();
+    pool.reserve(pq_heap.size());
+    while (!pq_heap.empty()) {
+        int vid = pq_heap.top().second; pq_heap.pop();
+        pool.emplace_back(l2(query_vector, all_vectors[vid]), vid);
     }
-    // heap was max-heap, so pool is in descending order; reverse → ascending.
-    std::reverse(pool.begin(), pool.end());
-
-    // Keep only the K nearest.
+    std::sort(pool.begin(), pool.end()); // ascending exact dist
     if ((int)pool.size() > K) pool.resize(K);
 
     std::vector<int> result;
     result.reserve(pool.size());
-    for (const auto& [dist, id] : pool)
-        result.push_back(id);
+    for (const auto& [dist, id] : pool) result.push_back(id);
 
     return SearchResult{result, setop_ms, query_ms};
 }

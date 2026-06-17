@@ -43,4 +43,5 @@ SearchResult perform_search(
     const std::vector<std::string>& all_strings,
     const PQIndex& pq,
     int K,
-    int ef = 0);   // 0 → use K (original behaviour)
+    int ef = 0,      // 0 → use K (original behaviour)
+    int nprobe = 0); // 0 → scan all candidate clusters (original behaviour)

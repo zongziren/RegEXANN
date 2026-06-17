@@ -66,6 +66,7 @@ struct Options {
     int   oversample  = 10;
     int   max_expansion = 0;    // postfilter: max expansion factor (0 = unlimited)
     int   ef          = 0;      // ann: candidate pool size (0 → use K)
+    int   ann_nprobe  = 0;      // ann: max clusters to scan (0 → all candidate clusters)
     float sample_ratio = 1.0f;  // prefilter: fraction of matching set to search
     int  graph_M         = 16;
     int  graph_ef_build  = 64;
@@ -84,7 +85,7 @@ struct Options {
         // Which options are meaningful for each algorithm
         static const std::unordered_map<std::string,
                std::vector<std::string>> valid_opts = {
-            {"ann",         {"pq_m","pq_ksub","ef","gt","save","load","fmt"}},
+            {"ann",         {"pq_m","pq_ksub","ef","nprobe","gt","save","load","fmt"}},
             {"hier",        {"pq_m","pq_ksub","k0","nprobe","gt","fmt"}},
             {"groundtruth", {"gt","fmt"}},
             {"baseline",    {"gt","fmt"}},
@@ -143,6 +144,11 @@ struct Options {
             else if (key == "oversample")   oversample    = std::stoi(val);
             else if (key == "max_expansion") max_expansion = std::stoi(val);
             else if (key == "ef")           ef            = std::stoi(val);
+            else if (key == "nprobe") {
+                // nprobe applies to both ann and hier; route by algorithm
+                if (algorithm == "ann") ann_nprobe = std::stoi(val);
+                else                    nprobe     = std::stoi(val);
+            }
             else if (key == "sample_ratio") sample_ratio  = std::stof(val);
             else if (key == "gt")           gt_file       = val;
             else if (key == "save")         save_prefix   = val;
@@ -321,6 +327,8 @@ static void run_ann(
     int eff_ef = (opts.ef > 0) ? opts.ef : K;
     std::cout << "[INFO] ef=" << eff_ef
               << (opts.ef <= 0 ? " (default=K, original behaviour)" : "") << "\n";
+    std::cout << "[INFO] nprobe=" << (opts.ann_nprobe > 0 ? opts.ann_nprobe : -1)
+              << (opts.ann_nprobe <= 0 ? " (scan all candidate clusters)" : "") << "\n";
 
     std::string line;
     int qcnt = 0;
@@ -333,7 +341,7 @@ static void run_ann(
         auto qa = Clock::now();
         auto r  = perform_search(rx, qv, gram_index,
                                  km.centroids, km.clusters,
-                                 vectors, strings, pq, K, opts.ef);
+                                 vectors, strings, pq, K, opts.ef, opts.ann_nprobe);
         auto qb = Clock::now();
         t_all   += std::chrono::duration_cast<us>(qb-qa).count() / 1000.0;
         t_set   += r.setop_time_ms;
