@@ -59,11 +59,14 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct Options {
-    int  pq_m        = 8;
-    int  pq_ksub     = 256;
-    int  k0          = 0;
-    int  nprobe      = 0;
-    int  oversample  = 10;
+    int   pq_m        = 8;
+    int   pq_ksub     = 256;
+    int   k0          = 0;
+    int   nprobe      = 0;
+    int   oversample  = 10;
+    int   max_expansion = 0;    // postfilter: max expansion factor (0 = unlimited)
+    int   ef          = 0;      // ann: candidate pool size (0 → use K)
+    float sample_ratio = 1.0f;  // prefilter: fraction of matching set to search
     int  graph_M         = 16;
     int  graph_ef_build  = 64;
     int  graph_ef_search = 64;
@@ -81,12 +84,12 @@ struct Options {
         // Which options are meaningful for each algorithm
         static const std::unordered_map<std::string,
                std::vector<std::string>> valid_opts = {
-            {"ann",         {"pq_m","pq_ksub","gt","save","load","fmt"}},
+            {"ann",         {"pq_m","pq_ksub","ef","gt","save","load","fmt"}},
             {"hier",        {"pq_m","pq_ksub","k0","nprobe","gt","fmt"}},
             {"groundtruth", {"gt","fmt"}},
             {"baseline",    {"gt","fmt"}},
-            {"prefilter",   {"gt","fmt"}},
-            {"postfilter",  {"oversample","gt","fmt"}},
+            {"prefilter",   {"sample_ratio","gt","fmt"}},
+            {"postfilter",  {"oversample","max_expansion","gt","fmt"}},
             {"graph",       {"graph_M","graph_ef_build","graph_ef_search","gt","fmt"}},
         };
         auto it = valid_opts.find(algorithm);
@@ -133,17 +136,20 @@ struct Options {
 
             // Parse
             bool known = true;
-            if      (key == "pq_m")       pq_m        = std::stoi(val);
-            else if (key == "pq_ksub")    pq_ksub     = std::stoi(val);
-            else if (key == "k0")         k0          = std::stoi(val);
-            else if (key == "nprobe")     nprobe      = std::stoi(val);
-            else if (key == "oversample") oversample  = std::stoi(val);
-            else if (key == "gt")         gt_file     = val;
-            else if (key == "save")       save_prefix = val;
-            else if (key == "load")       load_prefix = val;
-            else if (key == "fmt")        fmt         = val;
-            else if (key == "graph_M")        graph_M         = std::stoi(val);
-            else if (key == "graph_ef_build") graph_ef_build  = std::stoi(val);
+            if      (key == "pq_m")         pq_m          = std::stoi(val);
+            else if (key == "pq_ksub")      pq_ksub       = std::stoi(val);
+            else if (key == "k0")           k0            = std::stoi(val);
+            else if (key == "nprobe")       nprobe        = std::stoi(val);
+            else if (key == "oversample")   oversample    = std::stoi(val);
+            else if (key == "max_expansion") max_expansion = std::stoi(val);
+            else if (key == "ef")           ef            = std::stoi(val);
+            else if (key == "sample_ratio") sample_ratio  = std::stof(val);
+            else if (key == "gt")           gt_file       = val;
+            else if (key == "save")         save_prefix   = val;
+            else if (key == "load")         load_prefix   = val;
+            else if (key == "fmt")          fmt           = val;
+            else if (key == "graph_M")         graph_M         = std::stoi(val);
+            else if (key == "graph_ef_build")  graph_ef_build  = std::stoi(val);
             else if (key == "graph_ef_search") graph_ef_search = std::stoi(val);
             else { known = false; }
 
@@ -312,6 +318,9 @@ static void run_ann(
     }
 
     std::cout << "[INFO] Memory: " << rss_kb() / 1024.0 << " MB\n";
+    int eff_ef = (opts.ef > 0) ? opts.ef : K;
+    std::cout << "[INFO] ef=" << eff_ef
+              << (opts.ef <= 0 ? " (default=K, original behaviour)" : "") << "\n";
 
     std::string line;
     int qcnt = 0;
@@ -324,7 +333,7 @@ static void run_ann(
         auto qa = Clock::now();
         auto r  = perform_search(rx, qv, gram_index,
                                  km.centroids, km.clusters,
-                                 vectors, strings, pq, K);
+                                 vectors, strings, pq, K, opts.ef);
         auto qb = Clock::now();
         t_all   += std::chrono::duration_cast<us>(qb-qa).count() / 1000.0;
         t_set   += r.setop_time_ms;
@@ -518,18 +527,24 @@ int main(int argc, char* argv[]) {
 "Algorithms: ann | hier | graph | groundtruth | baseline | prefilter | postfilter\n"
 "\n"
 "Options (key=value):\n"
-"  pq_m=N          PQ subspaces              [ann/hier, default 8]\n"
-"  pq_ksub=N       PQ centroids/subspace     [ann/hier, default 256]\n"
-"  k0=N            Coarse clusters           [hier, default sqrt(clusters)]\n"
-"  nprobe=N        Coarse probe count        [hier, default k0/2]\n"
-"  oversample=N    Post-filter oversample    [postfilter, default 10]\n"
-"  gt=<file>       Ground-truth for Recall@K\n"
-"  save=<prefix>   Save index                [ann only]\n"
-"  load=<prefix>   Load saved index          [ann only]\n"
-"  fmt=fvecs|bvecs Vector file format\n"
-"  graph_M=N        Graph max degree              [graph, default 16]\n"
-"  graph_ef_build=N Graph build beam width         [graph, default 64]\n"
-"  graph_ef_search=N Graph search beam width        [graph, default 64]\n"
+"  pq_m=N            PQ subspaces                [ann/hier, default 8]\n"
+"  pq_ksub=N         PQ centroids/subspace        [ann/hier, default 256]\n"
+"  ef=N              Candidate pool size (>=K)    [ann, default K]\n"
+"                    Larger ef → higher recall, slower query.\n"
+"  k0=N              Coarse clusters              [hier, default sqrt(clusters)]\n"
+"  nprobe=N          Coarse probe count           [hier, default k0/2]\n"
+"  oversample=N      Post-filter initial window   [postfilter, default 10]\n"
+"  max_expansion=N   Post-filter max window cap   [postfilter, default 0=unlimited]\n"
+"                    0 = expand until K found or full scan; N = cap at K*N.\n"
+"  sample_ratio=F    Pre-filter match subset frac [prefilter, default 1.0]\n"
+"                    1.0 = exact (100% recall); <1.0 = faster, lower recall.\n"
+"  gt=<file>         Ground-truth for Recall@K\n"
+"  save=<prefix>     Save index                   [ann only]\n"
+"  load=<prefix>     Load saved index             [ann only]\n"
+"  fmt=fvecs|bvecs   Vector file format\n"
+"  graph_M=N         Graph max degree             [graph, default 16]\n"
+"  graph_ef_build=N  Graph build beam width       [graph, default 64]\n"
+"  graph_ef_search=N Graph search beam width      [graph, default 64]\n"
 "\n"
 "Postfilter shorthand: bare integer = oversample value\n"
 "  ./regann ... postfilter 20          (same as oversample=20)\n"
@@ -586,23 +601,27 @@ int main(int argc, char* argv[]) {
                 vectors, strings, qfin, fout, K, opts);
 
         } else if (algorithm == "prefilter") {
-            std::cout << "[INFO] Pre-filter baseline …\n";
+            std::cout << "[INFO] Pre-filter baseline (sample_ratio="
+                      << opts.sample_ratio << ") …\n";
+            float sr = opts.sample_ratio;
             run_baseline_loop(
-                [](const std::string& rx, const std::vector<float>& qv,
+                [sr](const std::string& rx, const std::vector<float>& qv,
                    const std::vector<std::vector<float>>& v,
                    const std::vector<std::string>& s, int k){
-                    return run_prefilter(rx, qv, v, s, k); },
+                    return run_prefilter(rx, qv, v, s, k, sr); },
                 vectors, strings, qfin, fout, K, opts);
 
         } else if (algorithm == "postfilter") {
             int ov = opts.oversample;
+            int me = opts.max_expansion;
             std::cout << "[INFO] Post-filter baseline (oversample="
-                      << ov << ") …\n";
+                      << ov << ", max_expansion="
+                      << (me > 0 ? std::to_string(me) : "unlimited") << ") …\n";
             run_baseline_loop(
-                [ov](const std::string& rx, const std::vector<float>& qv,
+                [ov, me](const std::string& rx, const std::vector<float>& qv,
                      const std::vector<std::vector<float>>& v,
                      const std::vector<std::string>& s, int k){
-                    return run_postfilter(rx, qv, v, s, k, ov); },
+                    return run_postfilter(rx, qv, v, s, k, ov, me); },
                 vectors, strings, qfin, fout, K, opts);
 
         } else {

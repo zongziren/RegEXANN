@@ -23,3 +23,12 @@
      results/siftsmall/prefilter.txt \
      30 prefilter \
      gt=results/siftsmall/gt.txt
+
+ ./exp/build/regann \
+     dataset/siftsmall/siftsmall_vectors.fvecs \
+     dataset/siftsmall/siftsmall_titles_clean.txt \
+     dataset/siftsmall/query.txt \
+     10 100 \
+     results/siftsmall/postfilter.txt \
+     30 postfilter \
+     gt=results/siftsmall/gt.txt
