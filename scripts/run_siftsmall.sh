@@ -76,7 +76,7 @@ done
 
 # ── 4. Post-filter — oversample sweep (6 values, max 1000) ───────────────────
 echo "[ 4 ] Post-filter (oversample sweep)"
-for OV in 10 20 50 100 200 1000; do
+for OV in 10 100 1000 10000 100000; do
     run postfilter oversample "${OV}" "${OUTDIR}/postfilter_ov${OV}.txt" \
         "oversample=${OV}" "max_expansion=${OV}"
 done

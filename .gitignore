@@ -1,12 +1,11 @@
 dataset/arxiv
-dataset/arxiv10K
-dataset/arxiv100K
-
 dataset/sift
-dataset/sift100K
 dataset/siftsmall
-
+dataset/gist
+dataset/words
 dataset/dblp
+dataset/msong
+dataset/audio
 
 build
 exp/build

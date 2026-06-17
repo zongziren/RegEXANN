@@ -1,37 +1,37 @@
 from datasets import load_dataset
 import numpy as np
 
+DATASET_NAME = "Qdrant/arxiv-titles-instructorxl-embeddings"
+OUT_TITLE = "arxiv_titles_all.txt"
+OUT_FVECS = "arxiv_vectors_all.fvecs"
+
 print("Downloading dataset...")
-ds = load_dataset("Qdrant/arxiv-titles-instructorxl-embeddings", split="train", streaming=False)
+ds = load_dataset(DATASET_NAME, split="train", streaming=False)
 
-titles = []
-vecs = []
+num_rows = len(ds)
+print(f"Total rows: {num_rows}")
 
-for i, item in enumerate(ds):
-    if i >= 100000:
-        break
-    titles.append(item["title"].replace("\n", " "))
-    vecs.append(item["vector"])
+first_vec = np.asarray(ds[0]["vector"], dtype=np.float32)
+dim = first_vec.shape[0]
+print(f"Vector dimension: {dim}")
 
-print("Saving titles to arxiv_titles_100k.txt ...")
-with open("arxiv_titles_100k.txt", "w", encoding="utf-8") as f:
-    for title in titles:
-        f.write(title + "\n")
+with open(OUT_TITLE, "w", encoding="utf-8") as title_f, \
+     open(OUT_FVECS, "wb") as fvecs_f:
 
+    for i, item in enumerate(ds):
+        title = item["title"].replace("\n", " ")
+        vec = np.asarray(item["vector"], dtype=np.float32)
 
-print("Saving vectors to arxiv_vectors_100k.npy ...")
-vecs_np = np.array(vecs, dtype=np.float32)
-np.save("arxiv_vectors_100k.npy", vecs_np)
+        title_f.write(title + "\n")
 
+        fvecs_f.write(np.int32(dim).tobytes())
+        fvecs_f.write(vec.tobytes())
 
-def save_fvecs(filename, array):
-    n, d = array.shape
-    with open(filename, "wb") as f:
-        for i in range(n):
-            f.write(np.int32(d).tobytes())
-            f.write(array[i].astype(np.float32).tobytes())
+        if (i + 1) % 10000 == 0:
+            print(f"Processed {i + 1}/{num_rows}")
 
-print("Saving vectors to arxiv_vectors_100k.fvecs ...")
-save_fvecs("arxiv_vectors_100k.fvecs", vecs_np)
-
-print(" Done: Titles, .npy and .fvecs saved.")
+print("Done.")
+print(f"Titles saved to: {OUT_TITLE}")
+print(f"Fvecs saved to: {OUT_FVECS}")
+print(f"Total vectors: {num_rows}")
+print(f"Dimension: {dim}")

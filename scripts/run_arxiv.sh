@@ -6,7 +6,7 @@ VEC=dataset/arxiv/vectors.fvecs
 STR=dataset/arxiv/strings.txt
 QRY=dataset/arxiv/query.txt
 K=10
-CLUSTERS=200
+CLUSTERS=500
 MAX_ITER=30
 OUTDIR=results/arxiv
 IDX="${OUTDIR}/idx/arxiv"
@@ -75,8 +75,8 @@ for SR in 1.0 0.9 0.8 0.7 0.5 0.3; do
 done
 
 # ── 4. Post-filter — oversample sweep (6 values, max 1000) ───────────────────
-echo "[ 4 ] Post-filter (oversample sweep: 10 20 50 100 200 1000)"
-for OV in 10 20 50 100 200 1000; do
+echo "[ 4 ] Post-filter (oversample sweep: 10 100 1000 10000 100000)"
+for OV in 10 100 1000 10000 100000; do
     run postfilter oversample "${OV}" "${OUTDIR}/postfilter_ov${OV}.txt" \
         "oversample=${OV}" "max_expansion=${OV}"
 done

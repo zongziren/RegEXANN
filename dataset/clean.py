@@ -5,8 +5,8 @@ def clean_text(text: str) -> str:
     text = re.sub(r'\s+', ' ', text)        
     return text.strip()                     
 
-input_path = "./sift/sift_titles.txt"
-output_path = "./sift/sift_titles_clean.txt"
+input_path = "./audio/audio_titles.txt"
+output_path = "./audio/strings.txt"
 
 with open(input_path, "r", encoding="utf-8") as fin, \
      open(output_path, "w", encoding="utf-8") as fout:
