@@ -6,7 +6,7 @@ VEC=dataset/sift/sift_vectors.fvecs
 STR=dataset/sift/sift_titles_clean.txt
 QRY=dataset/sift/query.txt
 K=10
-CLUSTERS=200
+CLUSTERS=500
 MAX_ITER=30
 OUTDIR=results/sift
 IDX="${OUTDIR}/idx/sift"
@@ -16,7 +16,7 @@ mkdir -p "${OUTDIR}/idx" "${OUTDIR}/logs"
 CSV="${OUTDIR}/summary.csv"
 echo "method,param,param_value,recall_pct,avg_time_ms,qps" > "${CSV}"
 
-# ── Helper: run binary, tee log, extract metrics, append to CSV ──────────────
+# ── Helper ────────────────────────────────────────────────────────────────────
 run() {
     local method="$1" param="$2" param_val="$3" out="$4"
     shift 4
@@ -55,9 +55,9 @@ else
 fi
 echo ""
 
-# ── 2. RegExANN — ef sweep ────────────────────────────────────────────────────
-echo "[ 2 ] RegExANN (ef sweep)"
-for EF in ${K} 20 50 100; do
+# ── 2. RegExANN — ef sweep (6 values) ────────────────────────────────────────
+echo "[ 2 ] RegExANN (ef sweep: 10 20 30 50 75 100)"
+for EF in 10 20 30 50 75 100; do
     OUT="${OUTDIR}/ann_ef${EF}.txt"
     if [ ! -f "${IDX}.kmidx" ]; then
         run ann ef "${EF}" "${OUT}" pq_m=8 "ef=${EF}" "save=${IDX}"
@@ -66,24 +66,17 @@ for EF in ${K} 20 50 100; do
     fi
 done
 
-# ── 3. RegExANN — nprobe sweep (ef=20 固定) ───────────────────────────────────
-echo "[ 3 ] RegExANN (nprobe sweep, ef=20)"
-for NP in 5 10 20 50 100; do
-    run ann nprobe "${NP}" "${OUTDIR}/ann_nprobe${NP}.txt" \
-        pq_m=8 ef=20 "nprobe=${NP}" "load=${IDX}"
-done
-
-# ── 4. Pre-filter — sample_ratio sweep ───────────────────────────────────────
-echo "[ 4 ] Pre-filter (sample_ratio sweep)"
-for SR in 1.0 0.9 0.8 0.7 0.6; do
+# ── 3. Pre-filter — sample_ratio sweep (6 values) ────────────────────────────
+echo "[ 3 ] Pre-filter (sample_ratio sweep: 1.0 0.9 0.8 0.7 0.5 0.3)"
+for SR in 1.0 0.9 0.8 0.7 0.5 0.3; do
     SR_TAG=$(echo "${SR}" | tr '.' 'p')
     run prefilter sample_ratio "${SR_TAG}" "${OUTDIR}/prefilter_sr${SR_TAG}.txt" \
         "sample_ratio=${SR}"
 done
 
-# ── 5. Post-filter — oversample sweep ────────────────────────────────────────
-echo "[ 5 ] Post-filter (oversample sweep)"
-for OV in 50 100 200 400 1000; do
+# ── 4. Post-filter — oversample sweep (6 values, max 1000) ───────────────────
+echo "[ 4 ] Post-filter (oversample sweep: 10 20 50 100 200 1000)"
+for OV in 10 20 50 100 200 1000; do
     run postfilter oversample "${OV}" "${OUTDIR}/postfilter_ov${OV}.txt" \
         "oversample=${OV}" "max_expansion=${OV}"
 done
@@ -91,6 +84,7 @@ done
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo "════════════════════════════════════════════════════════════"
 echo "  Recall / Speed Summary [sift]"
+echo "  clusters=500  K=10  queries=100"
 echo "════════════════════════════════════════════════════════════"
 printf "  %-38s  %8s  %12s  %10s\n" "Method" "Recall%" "Avg time(ms)" "QPS"
 printf "  %-38s  %8s  %12s  %10s\n" \

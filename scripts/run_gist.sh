@@ -2,14 +2,14 @@
 set -euo pipefail
 
 BIN=./exp/build/regann
-VEC=dataset/siftsmall/siftsmall_vectors.fvecs
-STR=dataset/siftsmall/siftsmall_titles_clean.txt
-QRY=dataset/siftsmall/query.txt
+VEC=dataset/gist/vectors.fvecs
+STR=dataset/gist/strings.txt
+QRY=dataset/gist/query.txt
 K=10
-CLUSTERS=100
+CLUSTERS=500
 MAX_ITER=30
-OUTDIR=results/siftsmall
-IDX="${OUTDIR}/idx/siftsmall"
+OUTDIR=results/gist
+IDX="${OUTDIR}/idx/gist"
 
 mkdir -p "${OUTDIR}/idx" "${OUTDIR}/logs"
 
@@ -56,7 +56,7 @@ fi
 echo ""
 
 # ── 2. RegExANN — ef sweep (6 values) ────────────────────────────────────────
-echo "[ 2 ] RegExANN (ef sweep)"
+echo "[ 2 ] RegExANN (ef sweep: 10 20 30 50 75 100)"
 for EF in 10 20 30 50 75 100; do
     OUT="${OUTDIR}/ann_ef${EF}.txt"
     if [ ! -f "${IDX}.kmidx" ]; then
@@ -67,15 +67,15 @@ for EF in 10 20 30 50 75 100; do
 done
 
 # ── 3. Pre-filter — sample_ratio sweep (6 values) ────────────────────────────
-echo "[ 3 ] Pre-filter (sample_ratio sweep)"
-for SR in 1.0 0.8 0.6 0.4 0.2 0.1; do
+echo "[ 3 ] Pre-filter (sample_ratio sweep: 1.0 0.9 0.8 0.7 0.5 0.3)"
+for SR in 1.0 0.9 0.8 0.7 0.5 0.3; do
     SR_TAG=$(echo "${SR}" | tr '.' 'p')
     run prefilter sample_ratio "${SR_TAG}" "${OUTDIR}/prefilter_sr${SR_TAG}.txt" \
         "sample_ratio=${SR}"
 done
 
 # ── 4. Post-filter — oversample sweep (6 values, max 1000) ───────────────────
-echo "[ 4 ] Post-filter (oversample sweep)"
+echo "[ 4 ] Post-filter (oversample sweep: 10 20 50 100 200 1000)"
 for OV in 10 20 50 100 200 1000; do
     run postfilter oversample "${OV}" "${OUTDIR}/postfilter_ov${OV}.txt" \
         "oversample=${OV}" "max_expansion=${OV}"
@@ -83,7 +83,8 @@ done
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo "════════════════════════════════════════════════════════════"
-echo "  Recall / Speed Summary [siftsmall]"
+echo "  Recall / Speed Summary [gist]"
+echo "  clusters=500  K=10  queries=100"
 echo "════════════════════════════════════════════════════════════"
 printf "  %-38s  %8s  %12s  %10s\n" "Method" "Recall%" "Avg time(ms)" "QPS"
 printf "  %-38s  %8s  %12s  %10s\n" \
