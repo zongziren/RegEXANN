@@ -15,7 +15,7 @@ IDX="${OUTDIR}/idx/gist"
 mkdir -p "${OUTDIR}/idx" "${OUTDIR}/logs"
 
 CSV="${OUTDIR}/summary.csv"
-echo "method,param,param_value,recall_pct,avg_time_ms,qps" > "${CSV}"
+echo "method,param,param_value,recall_pct,avg_time_ms,qps,peak_mem_mb,idx_size_mb" > "${CSV}"
 
 # ── Helper ────────────────────────────────────────────────────────────────────
 run() {
@@ -23,25 +23,39 @@ run() {
     shift 4
     local extra_args=("$@")
     local log="${OUTDIR}/logs/${method}_${param}${param_val}.log"
+    local timelog="${OUTDIR}/logs/${method}_${param}${param_val}.time.log"
 
     echo "  → ${method}  ${param}=${param_val}"
 
-    "${BIN}" "${VEC}" "${STR}" "${QRY}" \
+    /usr/bin/time -v -o "${timelog}" "${BIN}" "${VEC}" "${STR}" "${QRY}" \
         "${K}" "${CLUSTERS}" "${out}" "${MAX_ITER}" \
         "${method}" "${extra_args[@]}" "gt=${GT}" \
         2>&1 | tee "${log}"
 
-    local recall avg_time qps
+    local recall avg_time qps peak_mem_kb peak_mem_mb idx_size_mb
     recall=$(grep '\[EVAL\] Recall' "${log}"  | grep -oP '[\d.]+(?= %)' | head -1 || true)
     avg_time=$(grep -oP '(?<=Avg total time   : )[\d.]+|(?<=Avg: )[\d.]+' "${log}" | head -1 || true)
     qps=$(grep -oP '(?<=QPS              : )[\d.]+|(?<=QPS: )[\d.]+' "${log}" | head -1 || true)
+    peak_mem_kb=$(grep -oP "(?<=Maximum resident set size \(kbytes\): )\d+" "${timelog}" | head -1 || true)
+    if [ -n "${peak_mem_kb:-}" ]; then
+        peak_mem_mb=$(awk -v kb="${peak_mem_kb}" 'BEGIN { printf "%.2f", kb / 1024 }')
+    else
+        peak_mem_mb="N/A"
+    fi
+    if [ -d "${OUTDIR}/idx" ]; then
+        idx_size_mb=$(du -sm "${OUTDIR}/idx" | awk '{print $1}')
+    else
+        idx_size_mb="N/A"
+    fi
 
     recall="${recall:-N/A}"
     avg_time="${avg_time:-N/A}"
     qps="${qps:-N/A}"
+    peak_mem_mb="${peak_mem_mb:-N/A}"
+    idx_size_mb="${idx_size_mb:-N/A}"
 
-    echo "${method},${param},${param_val},${recall},${avg_time},${qps}" >> "${CSV}"
-    echo "     recall=${recall}%  avg_time=${avg_time}ms  QPS=${qps}"
+    echo "${method},${param},${param_val},${recall},${avg_time},${qps},${peak_mem_mb},${idx_size_mb}" >> "${CSV}"
+    echo "     recall=${recall}%  avg_time=${avg_time}ms  QPS=${qps}  peak_mem=${peak_mem_mb}MB  idx_size=${idx_size_mb}MB"
     echo ""
 }
 
@@ -50,7 +64,7 @@ run() {
 #  if [ -f "${GT}" ]; then
 #      echo "  (skipped — ${GT} already exists)"
 #  else
-#      "${BIN}" "${VEC}" "${STR}" "${QRY}" \
+#      /usr/bin/time -v -o "${timelog}" "${BIN}" "${VEC}" "${STR}" "${QRY}" \
 #          "${K}" "${CLUSTERS}" "${GT}" "${MAX_ITER}" \
 #          groundtruth 2>&1 | tee "${OUTDIR}/logs/groundtruth.log"
 #  fi
@@ -87,13 +101,13 @@ echo "════════════════════════�
 echo "  Recall / Speed Summary [gist]"
 echo "  clusters=500  K=10  queries=100"
 echo "════════════════════════════════════════════════════════════"
-printf "  %-38s  %8s  %12s  %10s\n" "Method" "Recall%" "Avg time(ms)" "QPS"
-printf "  %-38s  %8s  %12s  %10s\n" \
-    "──────────────────────────────────────" "────────" "────────────" "──────────"
-while IFS=, read -r method param pval recall avg_time qps; do
+printf "  %-38s  %8s  %12s  %10s  %12s  %12s\n" "Method" "Recall%" "Avg time(ms)" "QPS" "Mem(MB)" "Idx(MB)"
+printf "  %-38s  %8s  %12s  %10s  %12s  %12s\n" \
+    "──────────────────────────────────────" "────────" "────────────" "──────────" "────────────" "────────────"
+while IFS=, read -r method param pval recall avg_time qps peak_mem_mb idx_size_mb; do
     [ "${method}" = "method" ] && continue
-    printf "  %-38s  %8s  %12s  %10s\n" \
-        "${method} ${param}=${pval}" "${recall}" "${avg_time}" "${qps}"
+    printf "  %-38s  %8s  %12s  %10s  %12s  %12s\n" \
+        "${method} ${param}=${pval}" "${recall}" "${avg_time}" "${qps}" "${peak_mem_mb}" "${idx_size_mb}"
 done < "${CSV}"
 echo ""
 echo "CSV  → ${CSV}"

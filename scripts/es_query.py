@@ -158,7 +158,7 @@ def main():
 
             body = {
                 "knn": {
-                    "field": "embedding",
+                    "field": "vector",
                     "query_vector": qvec,
                     "k": args.k,
                     "num_candidates": args.num_candidates,
