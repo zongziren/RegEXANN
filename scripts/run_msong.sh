@@ -5,6 +5,7 @@ BIN=./exp/build/regann
 VEC=dataset/msong/vectors.fvecs
 STR=dataset/msong/strings.txt
 QRY=dataset/msong/query.txt
+GT=dataset/msong/groundtruth.txt
 K=10
 CLUSTERS=200
 MAX_ITER=30
@@ -27,7 +28,7 @@ run() {
 
     "${BIN}" "${VEC}" "${STR}" "${QRY}" \
         "${K}" "${CLUSTERS}" "${out}" "${MAX_ITER}" \
-        "${method}" "${extra_args[@]}" "gt=${OUTDIR}/gt.txt" \
+        "${method}" "${extra_args[@]}" "gt=${GT}" \
         2>&1 | tee "${log}"
 
     local recall avg_time qps
@@ -46,11 +47,11 @@ run() {
 
 # # ── 1. Ground Truth ───────────────────────────────────────────────────────────
 # echo "[ 1 ] Ground truth"
-# if [ -f "${OUTDIR}/gt.txt" ]; then
-#     echo "  (skipped — ${OUTDIR}/gt.txt already exists)"
+# if [ -f "${GT}" ]; then
+#     echo "  (skipped — ${GT} already exists)"
 # else
 #     "${BIN}" "${VEC}" "${STR}" "${QRY}" \
-#         "${K}" "${CLUSTERS}" "${OUTDIR}/gt.txt" "${MAX_ITER}" \
+#         "${K}" "${CLUSTERS}" "${GT}" "${MAX_ITER}" \
 #         groundtruth 2>&1 | tee "${OUTDIR}/logs/groundtruth.log"
 # fi
 # echo ""

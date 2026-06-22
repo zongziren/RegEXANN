@@ -66,14 +66,14 @@ echo "  max_attempts = ${MAX_ATTEMPTS}"
 echo "════════════════════════════════════════════════════════════"
 echo ""
 
-run_gen arxiv   dataset/arxiv/strings.txt          dataset/arxiv/vectors.fvecs
-run_gen words   dataset/words/strings.txt          dataset/words/vectors.fvecs
+#run_gen arxiv   dataset/arxiv/strings.txt          dataset/arxiv/vectors.fvecs
+#run_gen words   dataset/words/strings.txt          dataset/words/vectors.fvecs
 run_gen dbpedia dataset/dbpedia/strings.txt        dataset/dbpedia/vectors.fvecs
-run_gen sift    dataset/sift/sift_titles_clean.txt dataset/sift/sift_vectors.fvecs
-run_gen gist    dataset/gist/strings.txt           dataset/gist/vectors.fvecs
-run_gen laion   dataset/laion/strings.txt          dataset/laion/vectors.fvecs
-run_gen msong   dataset/msong/strings.txt          dataset/msong/vectors.fvecs
-run_gen audio   dataset/audio/strings.txt          dataset/audio/vectors.fvecs
+#run_gen sift    dataset/sift/strings.txt           dataset/sift/vectors.fvecs
+#run_gen gist    dataset/gist/strings.txt           dataset/gist/vectors.fvecs
+#run_gen laion   dataset/laion/strings.txt          dataset/laion/vectors.fvecs
+#run_gen msong   dataset/msong/strings.txt          dataset/msong/vectors.fvecs
+#run_gen audio   dataset/audio/strings.txt          dataset/audio/vectors.fvecs
 
 echo "════════════════════════════════════════════════════════════"
 echo "  Done."

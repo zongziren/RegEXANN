@@ -5,6 +5,7 @@ BIN=./exp/build/regann
 VEC=dataset/arxiv/vectors.fvecs
 STR=dataset/arxiv/strings.txt
 QRY=dataset/arxiv/query.txt
+GT=dataset/arxiv/groundtruth.txt
 K=10
 CLUSTERS=500
 MAX_ITER=30
@@ -27,7 +28,7 @@ run() {
 
     "${BIN}" "${VEC}" "${STR}" "${QRY}" \
         "${K}" "${CLUSTERS}" "${out}" "${MAX_ITER}" \
-        "${method}" "${extra_args[@]}" "gt=${OUTDIR}/gt.txt" \
+        "${method}" "${extra_args[@]}" "gt=${GT}" \
         2>&1 | tee "${log}"
 
     local recall avg_time qps
@@ -46,18 +47,18 @@ run() {
 
 # # ── 1. Ground Truth ───────────────────────────────────────────────────────────
 # echo "[ 1 ] Ground truth"
-# if [ -f "${OUTDIR}/gt.txt" ]; then
-#     echo "  (skipped — ${OUTDIR}/gt.txt already exists)"
+# if [ -f "${GT}" ]; then
+#     echo "  (skipped — ${GT} already exists)"
 # else
 #     "${BIN}" "${VEC}" "${STR}" "${QRY}" \
-#         "${K}" "${CLUSTERS}" "${OUTDIR}/gt.txt" "${MAX_ITER}" \
+#         "${K}" "${CLUSTERS}" "${GT}" "${MAX_ITER}" \
 #         groundtruth 2>&1 | tee "${OUTDIR}/logs/groundtruth.log"
 # fi
 # echo ""
 
 # ── 2. RegExANN — ef sweep (6 values) ────────────────────────────────────────
 echo "[ 2 ] RegExANN (ef sweep: 10 20 30 50 75 100)"
-for EF in 10 20 30 50 75 100; do
+for EF in 10 20 30 50 75 100 500 1000; do
     OUT="${OUTDIR}/ann_ef${EF}.txt"
     if [ ! -f "${IDX}.kmidx" ]; then
         run ann ef "${EF}" "${OUT}" pq_m=8 "ef=${EF}" "save=${IDX}"
