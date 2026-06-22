@@ -2,14 +2,14 @@
 set -euo pipefail
 
 BIN=./exp/build/regann
-VEC=dataset/tripclick/vectors.fvecs
-STR=dataset/tripclick/strings.txt
-QRY=dataset/tripclick/query.txt
+VEC=dataset/dbpedia/vectors.fvecs
+STR=dataset/dbpedia/strings.txt
+QRY=dataset/dbpedia/query.txt
 K=10
 CLUSTERS=500
 MAX_ITER=30
-OUTDIR=results/tripclick
-IDX="${OUTDIR}/idx/tripclick"
+OUTDIR=results/dbpedia
+IDX="${OUTDIR}/idx/dbpedia"
 
 mkdir -p "${OUTDIR}/idx" "${OUTDIR}/logs"
 
@@ -31,7 +31,7 @@ run() {
         2>&1 | tee "${log}"
 
     local recall avg_time qps
-    recall=$(grep '\[EVAL\] Recall' "${log}"  | grep -oP '[\d.]+(?= %)' | head -1 || true)
+    recall=$(grep '\[EVAL\] Recall' "${log}" | grep -oP '[\d.]+(?= %)' | head -1 || true)
     avg_time=$(grep -oP '(?<=Avg total time   : )[\d.]+|(?<=Avg: )[\d.]+' "${log}" | head -1 || true)
     qps=$(grep -oP '(?<=QPS              : )[\d.]+|(?<=QPS: )[\d.]+' "${log}" | head -1 || true)
 
@@ -55,9 +55,9 @@ else
 fi
 echo ""
 
-# ── 2. RegExANN — ef sweep (6 values) ────────────────────────────────────────
-echo "[ 2 ] RegExANN (ef sweep: 10 20 30 50 75 100)"
-for EF in 10 20 30 50 75 100; do
+# ── 2. RegExANN — ef sweep ───────────────────────────────────────────────────
+echo "[ 2 ] RegExANN (ef sweep: 10 20 30 50 75 100 500)"
+for EF in 10 20 30 50 75 100 250 500 800; do
     OUT="${OUTDIR}/ann_ef${EF}.txt"
     if [ ! -f "${IDX}.kmidx" ]; then
         run ann ef "${EF}" "${OUT}" pq_m=8 "ef=${EF}" "save=${IDX}"
@@ -66,7 +66,7 @@ for EF in 10 20 30 50 75 100; do
     fi
 done
 
-# ── 3. Pre-filter — sample_ratio sweep (6 values) ────────────────────────────
+# ── 3. Pre-filter — sample_ratio sweep ───────────────────────────────────────
 echo "[ 3 ] Pre-filter (sample_ratio sweep: 1.0 0.9 0.8 0.7 0.5 0.3)"
 for SR in 1.0 0.9 0.8 0.7 0.5 0.3; do
     SR_TAG=$(echo "${SR}" | tr '.' 'p')
@@ -74,7 +74,7 @@ for SR in 1.0 0.9 0.8 0.7 0.5 0.3; do
         "sample_ratio=${SR}"
 done
 
-# ── 4. Post-filter — oversample sweep (6 values, max 1000) ───────────────────
+# ── 4. Post-filter — oversample sweep ────────────────────────────────────────
 echo "[ 4 ] Post-filter (oversample sweep: 10 100 1000 10000 100000)"
 for OV in 10 100 1000 10000 100000; do
     run postfilter oversample "${OV}" "${OUTDIR}/postfilter_ov${OV}.txt" \
@@ -83,17 +83,19 @@ done
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo "════════════════════════════════════════════════════════════"
-echo "  Recall / Speed Summary [tripclick]"
-echo "  clusters=500  K=10  queries=100"
+echo "  Recall / Speed Summary [dbpedia]"
+echo "  clusters=500  K=10"
 echo "════════════════════════════════════════════════════════════"
 printf "  %-38s  %8s  %12s  %10s\n" "Method" "Recall%" "Avg time(ms)" "QPS"
 printf "  %-38s  %8s  %12s  %10s\n" \
     "──────────────────────────────────────" "────────" "────────────" "──────────"
+
 while IFS=, read -r method param pval recall avg_time qps; do
     [ "${method}" = "method" ] && continue
     printf "  %-38s  %8s  %12s  %10s\n" \
         "${method} ${param}=${pval}" "${recall}" "${avg_time}" "${qps}"
 done < "${CSV}"
+
 echo ""
 echo "CSV  → ${CSV}"
 echo "Logs → ${OUTDIR}/logs/"

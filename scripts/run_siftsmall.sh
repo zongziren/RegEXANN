@@ -44,16 +44,16 @@ run() {
     echo ""
 }
 
-# ── 1. Ground Truth ───────────────────────────────────────────────────────────
-echo "[ 1 ] Ground truth"
-if [ -f "${OUTDIR}/gt.txt" ]; then
-    echo "  (skipped — ${OUTDIR}/gt.txt already exists)"
-else
-    "${BIN}" "${VEC}" "${STR}" "${QRY}" \
-        "${K}" "${CLUSTERS}" "${OUTDIR}/gt.txt" "${MAX_ITER}" \
-        groundtruth 2>&1 | tee "${OUTDIR}/logs/groundtruth.log"
-fi
-echo ""
+# # ── 1. Ground Truth ───────────────────────────────────────────────────────────
+# echo "[ 1 ] Ground truth"
+# if [ -f "${OUTDIR}/gt.txt" ]; then
+#     echo "  (skipped — ${OUTDIR}/gt.txt already exists)"
+# else
+#     "${BIN}" "${VEC}" "${STR}" "${QRY}" \
+#         "${K}" "${CLUSTERS}" "${OUTDIR}/gt.txt" "${MAX_ITER}" \
+#         groundtruth 2>&1 | tee "${OUTDIR}/logs/groundtruth.log"
+# fi
+# echo ""
 
 # ── 2. RegExANN — ef sweep (6 values) ────────────────────────────────────────
 echo "[ 2 ] RegExANN (ef sweep)"

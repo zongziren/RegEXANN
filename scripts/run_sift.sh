@@ -2,8 +2,8 @@
 set -euo pipefail
 
 BIN=./exp/build/regann
-VEC=dataset/sift/sift_vectors.fvecs
-STR=dataset/sift/sift_titles_clean.txt
+VEC=dataset/sift/vectors.fvecs
+STR=dataset/sift/strings.txt
 QRY=dataset/sift/query.txt
 K=10
 CLUSTERS=500
@@ -44,16 +44,16 @@ run() {
     echo ""
 }
 
-# ── 1. Ground Truth ───────────────────────────────────────────────────────────
-echo "[ 1 ] Ground truth"
-if [ -f "${OUTDIR}/gt.txt" ]; then
-    echo "  (skipped — ${OUTDIR}/gt.txt already exists)"
-else
-    "${BIN}" "${VEC}" "${STR}" "${QRY}" \
-        "${K}" "${CLUSTERS}" "${OUTDIR}/gt.txt" "${MAX_ITER}" \
-        groundtruth 2>&1 | tee "${OUTDIR}/logs/groundtruth.log"
-fi
-echo ""
+# # ── 1. Ground Truth ───────────────────────────────────────────────────────────
+# echo "[ 1 ] Ground truth"
+# if [ -f "${OUTDIR}/gt.txt" ]; then
+#     echo "  (skipped — ${OUTDIR}/gt.txt already exists)"
+# else
+#     "${BIN}" "${VEC}" "${STR}" "${QRY}" \
+#         "${K}" "${CLUSTERS}" "${OUTDIR}/gt.txt" "${MAX_ITER}" \
+#         groundtruth 2>&1 | tee "${OUTDIR}/logs/groundtruth.log"
+# fi
+# echo ""
 
 # ── 2. RegExANN — ef sweep (6 values) ────────────────────────────────────────
 echo "[ 2 ] RegExANN (ef sweep: 10 20 30 50 75 100)"
