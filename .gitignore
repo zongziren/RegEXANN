@@ -6,6 +6,8 @@ dataset/words
 dataset/dblp
 dataset/msong
 dataset/audio
+dataset/laion
+dataset/dbpedia
 
 build
 exp/build
