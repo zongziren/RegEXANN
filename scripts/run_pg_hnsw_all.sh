@@ -23,12 +23,12 @@ DATASETS=(
   words
 )
 
-# arxiv 已经 load/build 过了，这里只 query，不重新 load
+
 SKIP_LOAD_DATASETS=(
   arxiv
 )
 
-EF_LIST=(10 20 40 80 100 200 400 800 1600)
+EF_LIST=(10 20 40 80 100 200 400 800)
 
 ROOT_OUTDIR="results/pg_hnsw_all"
 mkdir -p "${ROOT_OUTDIR}"
@@ -36,7 +36,6 @@ mkdir -p "${ROOT_OUTDIR}"
 ALL_SUMMARY="${ROOT_OUTDIR}/summary_all.csv"
 BUILD_SUMMARY="${ROOT_OUTDIR}/build_summary.csv"
 
-# append 模式：只有文件不存在时才写 header
 if [[ ! -f "${ALL_SUMMARY}" ]]; then
     echo "dataset,method,param,param_value,recall_pct,avg_time_ms,qps" > "${ALL_SUMMARY}"
 fi
@@ -66,7 +65,6 @@ for DATASET in "${DATASETS[@]}"; do
 
     SUMMARY="${OUTDIR}/summary.csv"
 
-    # append 模式：dataset 自己的 summary 也不覆盖
     if [[ ! -f "${SUMMARY}" ]]; then
         echo "method,param,param_value,recall_pct,avg_time_ms,qps" > "${SUMMARY}"
     fi
