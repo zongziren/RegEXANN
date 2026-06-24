@@ -181,53 +181,53 @@ echo ""
 
 check_pg_alive
 
-run_one arxiv \
-    dataset/arxiv/strings.txt \
-    dataset/arxiv/vectors.fvecs \
-    dataset/arxiv/query.txt \
-    dataset/arxiv/groundtruth.txt
+#run_one arxiv \
+#    dataset/arxiv/strings.txt \
+#    dataset/arxiv/vectors.fvecs \
+#    dataset/arxiv/query.txt \
+#    dataset/arxiv/groundtruth.txt
 
-run_one words \
-    dataset/words/strings.txt \
-    dataset/words/vectors.fvecs \
-    dataset/words/query.txt \
-    dataset/words/groundtruth.txt
+#run_one words \
+#    dataset/words/strings.txt \
+#    dataset/words/vectors.fvecs \
+#    dataset/words/query.txt \
+#    dataset/words/groundtruth.txt
 
-run_one dbpedia \
-    dataset/dbpedia/strings.txt \
-    dataset/dbpedia/vectors.fvecs \
-    dataset/dbpedia/query.txt \
-    dataset/dbpedia/groundtruth.txt
+#run_one dbpedia \
+#    dataset/dbpedia/strings.txt \
+#    dataset/dbpedia/vectors.fvecs \
+#    dataset/dbpedia/query.txt \
+#    dataset/dbpedia/groundtruth.txt
 
 run_one sift \
-    dataset/sift/sift_titles_clean.txt \
-    dataset/sift/sift_vectors.fvecs \
+    dataset/sift/strings.txt \
+    dataset/sift/vectors.fvecs \
     dataset/sift/query.txt \
     dataset/sift/groundtruth.txt
 
-run_one gist \
-    dataset/gist/strings.txt \
-    dataset/gist/vectors.fvecs \
-    dataset/gist/query.txt \
-    dataset/gist/groundtruth.txt
+#run_one gist \
+#    dataset/gist/strings.txt \
+#    dataset/gist/vectors.fvecs \
+#    dataset/gist/query.txt \
+#    dataset/gist/groundtruth.txt
 
-run_one laion \
-    dataset/laion/strings.txt \
-    dataset/laion/vectors.fvecs \
-    dataset/laion/query.txt \
-    dataset/laion/groundtruth.txt
+#run_one laion \
+#    dataset/laion/strings.txt \
+#    dataset/laion/vectors.fvecs \
+#    dataset/laion/query.txt \
+#    dataset/laion/groundtruth.txt
 
-run_one msong \
-    dataset/msong/strings.txt \
-    dataset/msong/vectors.fvecs \
-    dataset/msong/query.txt \
-    dataset/msong/groundtruth.txt
+#run_one msong \
+#    dataset/msong/strings.txt \
+#    dataset/msong/vectors.fvecs \
+#    dataset/msong/query.txt \
+#    dataset/msong/groundtruth.txt
 
-run_one audio \
-    dataset/audio/strings.txt \
-    dataset/audio/vectors.fvecs \
-    dataset/audio/query.txt \
-    dataset/audio/groundtruth.txt
+#run_one audio \
+#    dataset/audio/strings.txt \
+#    dataset/audio/vectors.fvecs \
+#    dataset/audio/query.txt \
+#    dataset/audio/groundtruth.txt
 
 echo "════════════════════════════════════════════════════════════"
 echo " All done."

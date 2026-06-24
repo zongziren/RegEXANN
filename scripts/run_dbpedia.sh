@@ -59,20 +59,20 @@ run() {
     echo ""
 }
 
-# ── 1. Ground Truth ───────────────────────────────────────────────────────────
-echo "[ 1 ] Ground truth"
-if [ -f "${GT}" ]; then
-    echo "  (skipped — ${GT} already exists)"
-else
-    /usr/bin/time -v -o "${timelog}" "${BIN}" "${VEC}" "${STR}" "${QRY}" \
-        "${K}" "${CLUSTERS}" "${GT}" "${MAX_ITER}" \
-        groundtruth 2>&1 | tee "${OUTDIR}/logs/groundtruth.log"
-fi
-echo ""
+## ── 1. Ground Truth ───────────────────────────────────────────────────────────
+#echo "[ 1 ] Ground truth"
+#if [ -f "${GT}" ]; then
+#    echo "  (skipped — ${GT} already exists)"
+#else
+#    /usr/bin/time -v -o "${timelog}" "${BIN}" "${VEC}" "${STR}" "${QRY}" \
+#        "${K}" "${CLUSTERS}" "${GT}" "${MAX_ITER}" \
+#        groundtruth 2>&1 | tee "${OUTDIR}/logs/groundtruth.log"
+#fi
+#echo ""
 
 # ── 2. RegExANN — ef sweep ───────────────────────────────────────────────────
 echo "[ 2 ] RegExANN (ef sweep: 10 20 30 50 75 100 500)"
-for EF in 10 20 30 50 75 100 250 500 800; do
+for EF in 10 20 30 50 75 100 250 500 800 1000 1500 2000; do
     OUT="${OUTDIR}/ann_ef${EF}.txt"
     if [ ! -f "${IDX}.kmidx" ]; then
         run ann ef "${EF}" "${OUT}" pq_m=8 "ef=${EF}" "save=${IDX}"

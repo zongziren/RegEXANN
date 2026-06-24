@@ -139,10 +139,7 @@ SearchResult perform_search(
         for (int vid : vids)
             pq_order.emplace_back(pq_approx_dist(dist_table, pq.codes[vid]), vid);
 
-        // partial_sort: only sort the first min(ef, size) elements.
-        // The rest will be pruned by within-cluster early-exit.
-        size_t sort_n = std::min(pq_order.size(), (size_t)ef);
-        std::partial_sort(pq_order.begin(), pq_order.begin()+sort_n, pq_order.end());
+        std::sort(pq_order.begin(), pq_order.end());
 
         // ── Scan in PQ order; regex check; update ef-pool ─────────────
         for (const auto& [pq_dist, vid] : pq_order) {

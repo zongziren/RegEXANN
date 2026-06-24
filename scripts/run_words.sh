@@ -72,7 +72,7 @@ run() {
 
 # ── 2. RegExANN — ef sweep (6 values) ────────────────────────────────────────
 echo "[ 2 ] RegExANN (ef sweep: 10 20 30 50 75 100)"
-for EF in 10 20 30 50 75 100; do
+for EF in 10 20 30 50 75 100 200 500; do
     OUT="${OUTDIR}/ann_ef${EF}.txt"
     if [ ! -f "${IDX}.kmidx" ]; then
         run ann ef "${EF}" "${OUT}" pq_m=8 "ef=${EF}" "save=${IDX}"

@@ -6,22 +6,87 @@ VEC=dataset/laion/vectors.fvecs
 STR=dataset/laion/strings.txt
 QRY=dataset/laion/query.txt
 GT=dataset/laion/groundtruth.txt
+
 K=10
 CLUSTERS=500
 MAX_ITER=30
+
 OUTDIR=results/laion
 IDX="${OUTDIR}/idx/laion"
 
 mkdir -p "${OUTDIR}/idx" "${OUTDIR}/logs"
 
 CSV="${OUTDIR}/summary.csv"
-echo "method,param,param_value,recall_pct,avg_time_ms,qps,peak_mem_mb,idx_size_mb" > "${CSV}"
 
-# ── Helper ────────────────────────────────────────────────────────────────────
+# 如果 summary.csv 不存在，就创建表头
+if [ ! -f "${CSV}" ]; then
+    echo "method,param,param_value,recall_pct,avg_time_ms,qps,peak_mem_mb,idx_size_mb" > "${CSV}"
+fi
+
+# ------------------------------------------------------------
+# Replace if same method,param,param_value exists;
+# otherwise append after existing postfilter/oversample rows.
+# ------------------------------------------------------------
+upsert_csv_row() {
+    local new_row="$1"
+    local method="$2"
+    local param="$3"
+    local pval="$4"
+
+    python3 - "$CSV" "$new_row" "$method" "$param" "$pval" <<'PY'
+import sys
+from pathlib import Path
+
+csv_path = Path(sys.argv[1])
+new_row = sys.argv[2]
+method = sys.argv[3]
+param = sys.argv[4]
+pval = sys.argv[5]
+
+lines = csv_path.read_text().splitlines()
+
+if not lines:
+    lines = ["method,param,param_value,recall_pct,avg_time_ms,qps,peak_mem_mb,idx_size_mb"]
+
+header = lines[0]
+body = lines[1:]
+
+replaced = False
+new_body = []
+
+for line in body:
+    parts = line.split(",")
+    if len(parts) >= 3 and parts[0] == method and parts[1] == param and parts[2] == pval:
+        new_body.append(new_row)
+        replaced = True
+    else:
+        new_body.append(line)
+
+if not replaced:
+    # 插入到最后一个 postfilter,oversample 后面
+    insert_pos = None
+    for i, line in enumerate(new_body):
+        parts = line.split(",")
+        if len(parts) >= 2 and parts[0] == method and parts[1] == param:
+            insert_pos = i + 1
+
+    if insert_pos is None:
+        new_body.append(new_row)
+    else:
+        new_body.insert(insert_pos, new_row)
+
+csv_path.write_text("\n".join([header] + new_body) + "\n")
+PY
+}
+
 run() {
-    local method="$1" param="$2" param_val="$3" out="$4"
+    local method="$1"
+    local param="$2"
+    local param_val="$3"
+    local out="$4"
     shift 4
     local extra_args=("$@")
+
     local log="${OUTDIR}/logs/${method}_${param}${param_val}.log"
     local timelog="${OUTDIR}/logs/${method}_${param}${param_val}.time.log"
 
@@ -32,16 +97,19 @@ run() {
         "${method}" "${extra_args[@]}" "gt=${GT}" \
         2>&1 | tee "${log}"
 
-    local recall avg_time qps peak_mem_kb peak_mem_mb idx_size_mb
-    recall=$(grep '\[EVAL\] Recall' "${log}"  | grep -oP '[\d.]+(?= %)' | head -1 || true)
+    local recall avg_time qps peak_mem_kb peak_mem_mb idx_size_mb row
+
+    recall=$(grep '\[EVAL\] Recall' "${log}" | grep -oP '[\d.]+(?= %)' | head -1 || true)
     avg_time=$(grep -oP '(?<=Avg total time   : )[\d.]+|(?<=Avg: )[\d.]+' "${log}" | head -1 || true)
     qps=$(grep -oP '(?<=QPS              : )[\d.]+|(?<=QPS: )[\d.]+' "${log}" | head -1 || true)
+
     peak_mem_kb=$(grep -oP "(?<=Maximum resident set size \(kbytes\): )\d+" "${timelog}" | head -1 || true)
     if [ -n "${peak_mem_kb:-}" ]; then
         peak_mem_mb=$(awk -v kb="${peak_mem_kb}" 'BEGIN { printf "%.2f", kb / 1024 }')
     else
         peak_mem_mb="N/A"
     fi
+
     if [ -d "${OUTDIR}/idx" ]; then
         idx_size_mb=$(du -sm "${OUTDIR}/idx" | awk '{print $1}')
     else
@@ -54,61 +122,38 @@ run() {
     peak_mem_mb="${peak_mem_mb:-N/A}"
     idx_size_mb="${idx_size_mb:-N/A}"
 
-    echo "${method},${param},${param_val},${recall},${avg_time},${qps},${peak_mem_mb},${idx_size_mb}" >> "${CSV}"
+    row="${method},${param},${param_val},${recall},${avg_time},${qps},${peak_mem_mb},${idx_size_mb}"
+
+    upsert_csv_row "${row}" "${method}" "${param}" "${param_val}"
+
     echo "     recall=${recall}%  avg_time=${avg_time}ms  QPS=${qps}  peak_mem=${peak_mem_mb}MB  idx_size=${idx_size_mb}MB"
+    echo "     updated CSV: ${CSV}"
     echo ""
 }
 
-# # ── 1. Ground Truth ───────────────────────────────────────────────────────────
-# echo "[ 1 ] Ground truth"
-# if [ -f "${GT}" ]; then
-#     echo "  (skipped — ${GT} already exists)"
-# else
-#     /usr/bin/time -v -o "${timelog}" "${BIN}" "${VEC}" "${STR}" "${QRY}" \
-#         "${K}" "${CLUSTERS}" "${GT}" "${MAX_ITER}" \
-#         groundtruth 2>&1 | tee "${OUTDIR}/logs/groundtruth.log"
-# fi
-# echo ""
+echo "[ LAION ] Post-filter oversample sweep: 10 20 50 100"
 
-# ── 2. RegExANN — ef sweep (6 values) ────────────────────────────────────────
-echo "[ 2 ] RegExANN (ef sweep: 10 20 30 50 75 100)"
-for EF in 10 20 30 50 75 100 250 500 1000 20000 50000; do
-    OUT="${OUTDIR}/ann_ef${EF}.txt"
-    if [ ! -f "${IDX}.kmidx" ]; then
-        run ann ef "${EF}" "${OUT}" pq_m=8 "ef=${EF}" "save=${IDX}"
-    else
-        run ann ef "${EF}" "${OUT}" pq_m=8 "ef=${EF}" "load=${IDX}"
-    fi
-done
-
-# ── 3. Pre-filter — sample_ratio sweep (6 values) ────────────────────────────
-echo "[ 3 ] Pre-filter (sample_ratio sweep: 1.0 0.9 0.8 0.7 0.5 0.3)"
-for SR in 1.0 0.9 0.8 0.7 0.5 0.3; do
-    SR_TAG=$(echo "${SR}" | tr '.' 'p')
-    run prefilter sample_ratio "${SR_TAG}" "${OUTDIR}/prefilter_sr${SR_TAG}.txt" \
-        "sample_ratio=${SR}"
-done
-
-# ── 4. Post-filter — oversample sweep (6 values, max 1000) ───────────────────
-echo "[ 4 ] Post-filter (oversample sweep: 10 100 1000 10000 100000)"
-for OV in 10 100 1000 10000 100000; do
+for OV in 10 20 50 100; do
     run postfilter oversample "${OV}" "${OUTDIR}/postfilter_ov${OV}.txt" \
         "oversample=${OV}" "max_expansion=${OV}"
 done
 
-# ── Summary ───────────────────────────────────────────────────────────────────
 echo "════════════════════════════════════════════════════════════"
-echo "  Recall / Speed Summary [laion]"
-echo "  clusters=500  K=10  queries=100"
+echo "  Updated Recall / Speed Summary [laion]"
 echo "════════════════════════════════════════════════════════════"
-printf "  %-38s  %8s  %12s  %10s  %12s  %12s\n" "Method" "Recall%" "Avg time(ms)" "QPS" "Mem(MB)" "Idx(MB)"
+
+printf "  %-38s  %8s  %12s  %10s  %12s  %12s\n" \
+    "Method" "Recall%" "Avg time(ms)" "QPS" "Mem(MB)" "Idx(MB)"
+
 printf "  %-38s  %8s  %12s  %10s  %12s  %12s\n" \
     "──────────────────────────────────────" "────────" "────────────" "──────────" "────────────" "────────────"
+
 while IFS=, read -r method param pval recall avg_time qps peak_mem_mb idx_size_mb; do
     [ "${method}" = "method" ] && continue
     printf "  %-38s  %8s  %12s  %10s  %12s  %12s\n" \
         "${method} ${param}=${pval}" "${recall}" "${avg_time}" "${qps}" "${peak_mem_mb}" "${idx_size_mb}"
 done < "${CSV}"
+
 echo ""
 echo "CSV  → ${CSV}"
 echo "Logs → ${OUTDIR}/logs/"
