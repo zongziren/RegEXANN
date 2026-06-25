@@ -194,15 +194,67 @@ struct RParser {
                 peek() == '?' || peek() == '{') break;
         }
         char q = consume_quantifier();
-        if (q == '*' || q == '?') return UNCONSTRAINED;
+        if (q == '*' || q == '?') {
+            // Real regex grammar: '*' and '?' (and, after the {m,n}
+            // fix above, a zero lower bound) quantify exactly ONE
+            // preceding atom — never an entire literal run. Because
+            // this parser greedily accumulates consecutive letters
+            // into a single `lit` before noticing the quantifier, the
+            // quantifier actually applies only to the LAST character
+            // of `lit` (the character immediately before it in the
+            // source string). Everything earlier in `lit` is still
+            // guaranteed to occur in every match.
+            //
+            // Previously the whole literal was discarded here, which
+            // was safe (no false negatives) but threw away far more
+            // trigram evidence than necessary — e.g. "applicatio?n"
+            // lost all of "applicati" just because of a trailing "o?".
+            // Dropping only the last character recovers that evidence
+            // while remaining safe: a trigram is only kept if it lies
+            // entirely within the guaranteed-mandatory prefix.
+            if (!lit.empty()) lit.pop_back();
+        }
         return dnf_from_literal(lit, vocab);
     }
 
     char consume_quantifier() {
         char c = peek();
         if (c == '*' || c == '+' || c == '?') { get(); return c; }
-        if (c == '{') { while (!done() && get() != '}') {} return '{'; }
+        if (c == '{') { return consume_brace_quantifier(); }
         return '\0';
+    }
+
+    // Parses {m}, {m,}, {m,n} and decides whether the lower bound m is
+    // zero (or missing/malformed, which we treat conservatively as zero).
+    //
+    // Safety rationale: a literal/group immediately followed by {m,n}
+    // is only guaranteed to occur in every match when m >= 1. When m == 0
+    // the preceding atom may be entirely absent, so any trigrams it
+    // contributes are NOT safe to require — treating them as mandatory
+    // can prune away clusters that actually contain a matching string
+    // (a false negative), which violates RegExANN's pruning-safety
+    // guarantee (Section 3.1.3 of the paper: only necessary trigrams may
+    // be used).
+    //
+    // We therefore reuse the existing optional-quantifier code path:
+    // returning '?' here makes the caller treat the preceding atom as
+    // UNCONSTRAINED, exactly like a real '*' or '?' would. A lower bound
+    // >= 1 still returns '{', which callers treat as mandatory (unchanged
+    // from the previous behaviour).
+    char consume_brace_quantifier() {
+        get(); // consume '{'
+        std::string lo;
+        while (!done() && std::isdigit((unsigned char)peek())) lo += get();
+        // Skip the rest of the quantifier (comma, upper bound) up to '}'.
+        while (!done() && peek() != '}') get();
+        if (!done()) get(); // consume '}'
+
+        // Missing lower bound (malformed, e.g. stray "{,3}") or a lower
+        // bound made entirely of zeros (e.g. "0", "00") both mean the
+        // atom is not guaranteed to occur.
+        bool lower_is_zero =
+            lo.empty() || lo.find_first_not_of('0') == std::string::npos;
+        return lower_is_zero ? '?' : '{';
     }
 
     void skip_char_class() {
