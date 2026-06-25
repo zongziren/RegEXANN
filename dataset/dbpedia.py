@@ -10,7 +10,7 @@ from datasets import load_dataset
 OUT_DIR = "dataset/dbpedia"
 os.makedirs(OUT_DIR, exist_ok=True)
 
-N_BASE = 1000000      # 想先小规模测试可以改成 100000
+N_BASE = 1000000
 N_QUERY = 1000
 SEED = 42
 
@@ -53,7 +53,6 @@ with open(base_vec_path, "wb") as fvec, \
         text = clean_text(row.get("text", ""))
         string = clean_text(title + " " + text)
 
-        # HF 字段通常叫 openai
         emb = row.get("openai", None)
         if emb is None:
             emb = row.get("embedding", None)
@@ -64,7 +63,6 @@ with open(base_vec_path, "wb") as fvec, \
         if v.shape[0] != 1536:
             raise ValueError(f"Unexpected dim: {v.shape[0]}")
 
-        # 前 N_BASE 条作为 base
         if base_count < N_BASE:
             fvec.write(struct.pack("i", len(v)))
             fvec.write(v.tobytes())
@@ -72,14 +70,10 @@ with open(base_vec_path, "wb") as fvec, \
             base_count += 1
             continue
 
-        # 后 N_QUERY 条作为 query vector
         if query_count < N_QUERY:
             fqvec.write(struct.pack("i", len(v)))
             fqvec.write(v.tobytes())
 
-            # query.txt 这里先写简单 regex workload
-            # 如果你的程序 query.txt 只需要 regex，就用下面这种。
-            # 如果你的 query.txt 需要别的格式，再告诉我我帮你改。
             patterns = [
                 ".*university.*",
                 ".*city.*",

@@ -44,3 +44,19 @@ std::set<int> get_candidate_clusters(
     const std::string& regex,
     const std::unordered_map<std::string, std::set<int>>& gram_index,
     int num_clusters);
+
+// Profiling variant: identical behaviour, but additionally accumulates
+// wall-clock time (in ms) spent in two disjoint phases:
+//   parse_ms   — pure regex-string traversal: splitting into literal runs,
+//                slicing each literal into overlapping trigram substrings,
+//                walking quantifiers/groups/escapes. No gram_index access.
+//   lookup_ms  — gram_index.find() calls + set_intersection/set_union over
+//                std::set<int> cluster-id sets (the actual "table lookup").
+// Used only by the profiling driver (algorithm=ann with profile=1); the
+// plain overload above is unchanged and used by all other call sites.
+std::set<int> get_candidate_clusters_profiled(
+    const std::string& regex,
+    const std::unordered_map<std::string, std::set<int>>& gram_index,
+    int num_clusters,
+    double& parse_ms,
+    double& lookup_ms);

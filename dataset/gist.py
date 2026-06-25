@@ -4,7 +4,6 @@ import re
 import html
 import numpy as np
 
-# ====== 配置 ======
 IN_FVECS = "gist/gist_base.fvecs"
 DBLP_PATH = "dblp/dblp.xml"
 OUT_TITLES = "gist/gist_titles_1m.txt"
@@ -65,13 +64,10 @@ def sample_dblp_titles(xml_path, target_n, seed):
             if not title:
                 continue
 
-            # 跳过 DBLP 首页那种非论文标题，可选
             if title.lower() in {"home page", "dblp"}:
                 continue
 
             seen += 1
-
-            # Reservoir sampling: 从所有 DBLP title 里面随机抽 target_n 个
             if len(reservoir) < target_n:
                 reservoir.append(title)
             else:

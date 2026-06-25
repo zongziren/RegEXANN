@@ -21,7 +21,6 @@ def extract_first_n(input_path, output_path, n=100000):
     write_fvecs(output_path, subset)
     print(f"Saved first {n} vectors to {output_path}")
 
-# 示例调用
 if __name__ == "__main__":
     extract_first_n(
         "./sift/sift_base.fvecs",

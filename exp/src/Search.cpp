@@ -193,3 +193,153 @@ SearchResult perform_search(
 
     return SearchResult{result, setop_ms, query_ms};
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Profiling variant — same algorithm, fine-grained stage timing (t1..t5).
+//   t1 = regex -> trigram literal parsing
+//   t2 = gram_index lookup/set-ops + sort candidate clusters by centroid dist
+//   t3 = PQ distance compute/sort/early-exit bookkeeping (no regex calls)
+//   t4 = std::regex_search calls (regex verification)
+//   t5 = final exact-distance rerank of ef survivors -> top-K
+// ─────────────────────────────────────────────────────────────────────────────
+
+SearchResult perform_search_profiled(
+        const std::string& regex_str,
+        const std::vector<float>& query_vector,
+        const std::unordered_map<std::string, std::set<int>>& gram_index,
+        const std::vector<std::vector<float>>& centroids,
+        const std::vector<std::vector<int>>& clusters,
+        const std::vector<std::vector<float>>& all_vectors,
+        const std::vector<std::string>& all_strings,
+        const PQIndex& pq,
+        int K,
+        int ef,
+        int nprobe) {
+
+    if (ef <= 0) ef = K;
+    if (ef < K)  ef = K;
+
+    using Clock = std::chrono::high_resolution_clock;
+    using us    = std::chrono::microseconds;
+    auto ms_since = [](std::chrono::high_resolution_clock::time_point t0) {
+        return std::chrono::duration_cast<us>(Clock::now()-t0).count() / 1000.0;
+    };
+
+    SearchResult out;
+
+    // ── Step 1+2: trigram parse (t1) + gram_index lookup/set-ops (t2) ─────
+    int num_clusters = static_cast<int>(centroids.size());
+    double parse_ms = 0.0, lookup_ms = 0.0;
+    std::set<int> candidate_clusters = get_candidate_clusters_profiled(
+        regex_str, gram_index, num_clusters, parse_ms, lookup_ms);
+    out.t1_trigram_parse_ms  = parse_ms;
+    out.t2_cluster_lookup_ms = lookup_ms;
+    out.num_candidate_clusters = (long)candidate_clusters.size();
+
+    // Sorting candidates by centroid distance is "which clusters do we scan"
+    // bookkeeping → charged to t2, same as the original setop_ms convention.
+    auto t2b = Clock::now();
+    std::vector<std::pair<float,int>> cluster_dists;
+    cluster_dists.reserve(candidate_clusters.size());
+    for (int cid : candidate_clusters)
+        cluster_dists.emplace_back(l2(query_vector, centroids[cid]), cid);
+    std::sort(cluster_dists.begin(), cluster_dists.end());
+    out.t2_cluster_lookup_ms += ms_since(t2b);
+
+    std::regex pattern;
+    try {
+        pattern = std::regex(regex_str, std::regex::icase);
+    } catch (const std::regex_error& e) {
+        std::cerr << "[WARN] Invalid regex: " << e.what() << "\n";
+        out.setop_time_ms = out.t1_trigram_parse_ms + out.t2_cluster_lookup_ms;
+        return out;
+    }
+
+    auto dist_table = compute_dist_table(pq, query_vector);
+
+    constexpr float EARLY_STOP_SLACK = 1.5f;
+    using PqId = std::pair<float,int>;
+    std::priority_queue<PqId> pq_heap;
+
+    double t3_ms = 0.0, t4_ms = 0.0;
+    long regex_checks = 0;
+    int scanned = 0;
+
+    for (int ci = 0; ci < (int)cluster_dists.size(); ++ci) {
+        const auto [centroid_dist, cid] = cluster_dists[ci];
+
+        if (nprobe > 0 && scanned >= nprobe) break;
+        ++scanned;
+
+        const auto& vids = clusters[cid];
+
+        // ── t3: PQ distance compute + sort ─────────────────────────────
+        auto t3a = Clock::now();
+        std::vector<PqId> pq_order;
+        pq_order.reserve(vids.size());
+        for (int vid : vids)
+            pq_order.emplace_back(pq_approx_dist(dist_table, pq.codes[vid]), vid);
+        std::sort(pq_order.begin(), pq_order.end());
+        t3_ms += ms_since(t3a);
+
+        // ── Scan in PQ order: t3 bookkeeping vs t4 regex_search ────────
+        for (const auto& [pq_dist, vid] : pq_order) {
+            auto t3c = Clock::now();
+            bool early_exit = (int)pq_heap.size() == ef && pq_dist > pq_heap.top().first;
+            t3_ms += ms_since(t3c);
+            if (early_exit) break;
+
+            auto t4a = Clock::now();
+            bool matched = std::regex_search(all_strings[vid], pattern);
+            t4_ms += ms_since(t4a);
+            ++regex_checks;
+            if (!matched) continue;
+
+            auto t3d = Clock::now();
+            pq_heap.emplace(pq_dist, vid);
+            if ((int)pq_heap.size() > ef) pq_heap.pop();
+            t3_ms += ms_since(t3d);
+        }
+
+        // ── Cluster-level heuristic early-exit (t3 bookkeeping) ────────
+        auto t3e = Clock::now();
+        bool stop = false;
+        if (nprobe == 0 &&
+            (int)pq_heap.size() == ef &&
+            ci + 1 < (int)cluster_dists.size()) {
+            float next_cd    = cluster_dists[ci+1].first;
+            float next_cd_sq = next_cd * next_cd;
+            float worst_pq   = pq_heap.top().first;
+            if (next_cd_sq > worst_pq * EARLY_STOP_SLACK) stop = true;
+        }
+        t3_ms += ms_since(t3e);
+        if (stop) break;
+    }
+
+    out.t3_pq_scan_ms      = t3_ms;
+    out.t4_regex_verify_ms = t4_ms;
+    out.num_regex_checks   = regex_checks;
+
+    // ── t5: exact rerank ef survivors → top-K ──────────────────────────
+    auto t5a = Clock::now();
+    using DistId = std::pair<float,int>;
+    std::vector<DistId> pool;
+    pool.reserve(pq_heap.size());
+    while (!pq_heap.empty()) {
+        int vid = pq_heap.top().second; pq_heap.pop();
+        pool.emplace_back(l2(query_vector, all_vectors[vid]), vid);
+    }
+    std::sort(pool.begin(), pool.end());
+    if ((int)pool.size() > K) pool.resize(K);
+
+    std::vector<int> result;
+    result.reserve(pool.size());
+    for (const auto& [dist, id] : pool) result.push_back(id);
+    out.t5_rerank_ms = ms_since(t5a);
+
+    out.top_ids = std::move(result);
+    // legacy fields, for compatibility with existing CSV columns
+    out.setop_time_ms = out.t1_trigram_parse_ms + out.t2_cluster_lookup_ms;
+    out.query_time_ms = out.t3_pq_scan_ms + out.t4_regex_verify_ms + out.t5_rerank_ms;
+    return out;
+}

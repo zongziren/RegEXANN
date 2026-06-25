@@ -333,19 +333,25 @@ static void run_ann(
     std::string line;
     int qcnt = 0;
     double t_all = 0, t_set = 0, t_clust = 0;
+    double t1_sum = 0, t2_sum = 0, t3_sum = 0, t4_sum = 0, t5_sum = 0;
     std::vector<std::vector<int>> all_preds;
 
     while (std::getline(qfin, line)) {
         std::string rx; std::vector<float> qv;
         if (!parse_query(line, rx, qv)) continue;
         auto qa = Clock::now();
-        auto r  = perform_search(rx, qv, gram_index,
+        auto r  = perform_search_profiled(rx, qv, gram_index,
                                  km.centroids, km.clusters,
                                  vectors, strings, pq, K, opts.ef, opts.ann_nprobe);
         auto qb = Clock::now();
         t_all   += std::chrono::duration_cast<us>(qb-qa).count() / 1000.0;
         t_set   += r.setop_time_ms;
         t_clust += r.query_time_ms;
+        t1_sum  += r.t1_trigram_parse_ms;
+        t2_sum  += r.t2_cluster_lookup_ms;
+        t3_sum  += r.t3_pq_scan_ms;
+        t4_sum  += r.t4_regex_verify_ms;
+        t5_sum  += r.t5_rerank_ms;
         ++qcnt;
         for (int id : r.top_ids) fout << id << " ";
         fout << "\n";
@@ -357,6 +363,13 @@ static void run_ann(
                   << "[INFO] Avg total time   : " << t_all/qcnt    << " ms\n"
                   << "[INFO] Avg set-op time  : " << t_set/qcnt    << " ms\n"
                   << "[INFO] Avg cluster time : " << t_clust/qcnt  << " ms\n"
+                  << "[INFO] -- 4-stage breakdown --\n"
+                  << "[INFO]   (1) trigram parse  : " << t1_sum/qcnt << " ms\n"
+                  << "[INFO]   (2) cluster lookup : " << t2_sum/qcnt << " ms\n"
+                  << "[INFO]   (3) PQ candidate scan : " << t3_sum/qcnt << " ms\n"
+                  << "[INFO]   (4) regex verify + rerank : "
+                  << (t4_sum+t5_sum)/qcnt << " ms"
+                  << "  (regex=" << t4_sum/qcnt << "ms, rerank=" << t5_sum/qcnt << "ms)\n"
                   << "[INFO] QPS              : "
                   << 1000.0*qcnt/t_all << "\n";
     }
