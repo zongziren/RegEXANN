@@ -70,9 +70,6 @@ def count_fvecs(fname):
 
 
 def clean_title(s):
-    # DBLP titles come from raw XML and may contain entities like &amp;,
-    # so unescape first, then run through clean_text() for the final
-    # letters-only normalization.
     if s is None:
         return ""
     s = html.unescape(str(s))
