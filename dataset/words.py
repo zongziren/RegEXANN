@@ -1,7 +1,17 @@
 import struct
+import re
 import numpy as np
 from wordfreq import top_n_list
 from sentence_transformers import SentenceTransformer
+
+
+def clean_text(text) -> str:
+    if text is None:
+        return ""
+    text = str(text)
+    text = re.sub(r"[^a-zA-Z ]", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
 
 # =========================
 # Config
@@ -43,6 +53,10 @@ def main():
     print("Generating word list from wordfreq...")
 
     base_words = top_n_list(LANG, BASE_N)
+    # wordfreq's English list is already letters-only in practice, but run
+    # through the shared clean_text() for consistency with the other
+    # datasets (no filtering afterwards, to keep the count == BASE_N).
+    base_words = [clean_text(w) for w in base_words]
 
     print("base words:", len(base_words))
 

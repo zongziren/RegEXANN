@@ -7,6 +7,15 @@ from tqdm import tqdm
 from datasets import load_dataset
 
 
+def clean_text(text) -> str:
+    if text is None:
+        return ""
+    text = str(text)
+    text = re.sub(r"[^a-zA-Z ]", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
 OUT_DIR = "dataset/dbpedia"
 os.makedirs(OUT_DIR, exist_ok=True)
 
@@ -16,12 +25,6 @@ SEED = 42
 
 random.seed(SEED)
 np.random.seed(SEED)
-
-
-def clean_text(s: str) -> str:
-    s = str(s).replace("\n", " ").replace("\r", " ")
-    s = re.sub(r"\s+", " ", s)
-    return s.strip()
 
 
 def write_fvecs(path, vectors):

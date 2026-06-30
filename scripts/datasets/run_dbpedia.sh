@@ -2,20 +2,20 @@
 set -euo pipefail
 
 BIN=./exp/build/regann
-VEC=dataset/arxiv/vectors.fvecs
-STR=dataset/arxiv/strings.txt
-QRY=dataset/arxiv/query.txt
-GT=dataset/arxiv/groundtruth.txt
+VEC=dataset/dbpedia/vectors.fvecs
+STR=dataset/dbpedia/strings.txt
+QRY=dataset/dbpedia/query.txt
+GT=dataset/dbpedia/groundtruth.txt
 K=10
 CLUSTERS=500
 MAX_ITER=30
-OUTDIR=results/arxiv
-IDX="${OUTDIR}/idx/arxiv"
+OUTDIR=results/dbpedia
+IDX="${OUTDIR}/idx/dbpedia"
 
 mkdir -p "${OUTDIR}/idx" "${OUTDIR}/logs"
 
 CSV="${OUTDIR}/summary.csv"
-echo "method,param,param_value,recall_pct,avg_time_ms,qps,peak_mem_mb,idx_size_mb" > "${CSV}"
+echo "method,param,param_value,recall_pct,avg_time_ms,qps,peak_mem_mb,idx_size_mb,t1_trigram_parse_ms,t2_cluster_lookup_ms,t3_pq_scan_ms,t4_regex_verify_ms,t5_rerank_ms" > "${CSV}"
 
 # ── Helper ────────────────────────────────────────────────────────────────────
 run() {
@@ -33,7 +33,7 @@ run() {
         2>&1 | tee "${log}"
 
     local recall avg_time qps peak_mem_kb peak_mem_mb idx_size_mb
-    recall=$(grep '\[EVAL\] Recall' "${log}"  | grep -oP '[\d.]+(?= %)' | head -1 || true)
+    recall=$(grep '\[EVAL\] Recall' "${log}" | grep -oP '[\d.]+(?= %)' | head -1 || true)
     avg_time=$(grep -oP '(?<=Avg total time   : )[\d.]+|(?<=Avg: )[\d.]+' "${log}" | head -1 || true)
     qps=$(grep -oP '(?<=QPS              : )[\d.]+|(?<=QPS: )[\d.]+' "${log}" | head -1 || true)
     peak_mem_kb=$(grep -oP "(?<=Maximum resident set size \(kbytes\): )\d+" "${timelog}" | head -1 || true)
@@ -48,31 +48,41 @@ run() {
         idx_size_mb="N/A"
     fi
 
+    # 4-stage pipeline breakdown (printed only for method=ann; N/A for other methods)
+    local t1 t2 t3 t4_regex t5_rerank
+    t1=$(grep -oP '(?<=\(1\) trigram parse  : )[\d.]+' "${log}" || true)
+    t2=$(grep -oP '(?<=\(2\) cluster lookup : )[\d.]+' "${log}" || true)
+    t3=$(grep -oP '(?<=\(3\) PQ candidate scan : )[\d.]+' "${log}" || true)
+    t4_regex=$(grep -oP '(?<=regex=)[\d.]+' "${log}" || true)
+    t5_rerank=$(grep -oP '(?<=rerank=)[\d.]+' "${log}" || true)
+
     recall="${recall:-N/A}"
     avg_time="${avg_time:-N/A}"
     qps="${qps:-N/A}"
     peak_mem_mb="${peak_mem_mb:-N/A}"
     idx_size_mb="${idx_size_mb:-N/A}"
+    t1="${t1:-N/A}"; t2="${t2:-N/A}"; t3="${t3:-N/A}"
+    t4_regex="${t4_regex:-N/A}"; t5_rerank="${t5_rerank:-N/A}"
 
-    echo "${method},${param},${param_val},${recall},${avg_time},${qps},${peak_mem_mb},${idx_size_mb}" >> "${CSV}"
-    echo "     recall=${recall}%  avg_time=${avg_time}ms  QPS=${qps}  peak_mem=${peak_mem_mb}MB  idx_size=${idx_size_mb}MB"
+    echo "${method},${param},${param_val},${recall},${avg_time},${qps},${peak_mem_mb},${idx_size_mb},${t1},${t2},${t3},${t4_regex},${t5_rerank}" >> "${CSV}"
+    echo "     recall=${recall}%  avg_time=${avg_time}ms  QPS=${qps}  peak_mem=${peak_mem_mb}MB  idx_size=${idx_size_mb}MB  [t1=${t1} t2=${t2} t3=${t3} t4_regex=${t4_regex} t5_rerank=${t5_rerank}]"
     echo ""
 }
 
-# # ── 1. Ground Truth ───────────────────────────────────────────────────────────
-# echo "[ 1 ] Ground truth"
-# if [ -f "${GT}" ]; then
-#     echo "  (skipped — ${GT} already exists)"
-# else
-#     /usr/bin/time -v -o "${timelog}" "${BIN}" "${VEC}" "${STR}" "${QRY}" \
-#         "${K}" "${CLUSTERS}" "${GT}" "${MAX_ITER}" \
-#         groundtruth 2>&1 | tee "${OUTDIR}/logs/groundtruth.log"
-# fi
-# echo ""
+## ── 1. Ground Truth ───────────────────────────────────────────────────────────
+#echo "[ 1 ] Ground truth"
+#if [ -f "${GT}" ]; then
+#    echo "  (skipped — ${GT} already exists)"
+#else
+#    /usr/bin/time -v -o "${timelog}" "${BIN}" "${VEC}" "${STR}" "${QRY}" \
+#        "${K}" "${CLUSTERS}" "${GT}" "${MAX_ITER}" \
+#        groundtruth 2>&1 | tee "${OUTDIR}/logs/groundtruth.log"
+#fi
+#echo ""
 
-# ── 2. RegExANN — ef sweep (6 values) ────────────────────────────────────────
-echo "[ 2 ] RegExANN (ef sweep: 10 20 30 50 75 100)"
-for EF in 10 20 30 50 75 100 500 1000; do
+# ── 2. RegExANN — ef sweep ───────────────────────────────────────────────────
+echo "[ 2 ] RegExANN (ef sweep: 10 20 30 50 75 100 500)"
+for EF in 10 20 30 50 75 100 250 500 800 1000 1500 2000; do
     OUT="${OUTDIR}/ann_ef${EF}.txt"
     if [ ! -f "${IDX}.kmidx" ]; then
         run ann ef "${EF}" "${OUT}" pq_m=8 "ef=${EF}" "save=${IDX}"
@@ -81,7 +91,7 @@ for EF in 10 20 30 50 75 100 500 1000; do
     fi
 done
 
-# ── 3. Pre-filter — sample_ratio sweep (6 values) ────────────────────────────
+# ── 3. Pre-filter — sample_ratio sweep ───────────────────────────────────────
 echo "[ 3 ] Pre-filter (sample_ratio sweep: 1.0 0.9 0.8 0.7 0.5 0.3)"
 for SR in 1.0 0.9 0.8 0.7 0.5 0.3; do
     SR_TAG=$(echo "${SR}" | tr '.' 'p')
@@ -89,7 +99,7 @@ for SR in 1.0 0.9 0.8 0.7 0.5 0.3; do
         "sample_ratio=${SR}"
 done
 
-# ── 4. Post-filter — oversample sweep (6 values, max 1000) ───────────────────
+# ── 4. Post-filter — oversample sweep ────────────────────────────────────────
 echo "[ 4 ] Post-filter (oversample sweep: 10 100 1000 10000 100000)"
 for OV in 10 100 1000 10000 100000; do
     run postfilter oversample "${OV}" "${OUTDIR}/postfilter_ov${OV}.txt" \
@@ -98,17 +108,19 @@ done
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo "════════════════════════════════════════════════════════════"
-echo "  Recall / Speed Summary [arxiv]"
-echo "  clusters=200  K=10  queries=100"
+echo "  Recall / Speed Summary [dbpedia]"
+echo "  clusters=500  K=10"
 echo "════════════════════════════════════════════════════════════"
 printf "  %-38s  %8s  %12s  %10s  %12s  %12s\n" "Method" "Recall%" "Avg time(ms)" "QPS" "Mem(MB)" "Idx(MB)"
 printf "  %-38s  %8s  %12s  %10s  %12s  %12s\n" \
     "──────────────────────────────────────" "────────" "────────────" "──────────" "────────────" "────────────"
+
 while IFS=, read -r method param pval recall avg_time qps peak_mem_mb idx_size_mb; do
     [ "${method}" = "method" ] && continue
     printf "  %-38s  %8s  %12s  %10s  %12s  %12s\n" \
         "${method} ${param}=${pval}" "${recall}" "${avg_time}" "${qps}" "${peak_mem_mb}" "${idx_size_mb}"
 done < "${CSV}"
+
 echo ""
 echo "CSV  → ${CSV}"
 echo "Logs → ${OUTDIR}/logs/"

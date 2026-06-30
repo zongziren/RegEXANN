@@ -1,4 +1,27 @@
+import os
+import random
+import re
+import html
 import numpy as np
+
+
+def clean_text(text) -> str:
+    if text is None:
+        return ""
+    text = str(text)
+    text = re.sub(r"[^a-zA-Z ]", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+IN_FVECS = "sift/sift_base.fvecs"
+DBLP_PATH = "dblp/dblp.xml"
+OUT_TITLES = "sift/sift_titles_1m.txt"
+
+TARGET_N = 1_000_000
+SEED = 42
+# ==================
+
 
 def read_fvecs(path):
     with open(path, "rb") as f:
@@ -7,6 +30,7 @@ def read_fvecs(path):
         data = np.fromfile(f, dtype=np.float32)
         return data.reshape(-1, dim + 1)
 
+
 def write_fvecs(path, data):
     n, dim = data.shape
     with open(path, "wb") as f:
@@ -14,16 +38,139 @@ def write_fvecs(path, data):
             f.write(np.array([dim], dtype=np.int32).tobytes())
             f.write(vec.astype(np.float32).tobytes())
 
+
 def extract_first_n(input_path, output_path, n=100000):
+    """Utility: slice the first n vectors out of a larger fvecs file.
+    Not part of the main title-generation pipeline below; kept for ad-hoc
+    subsetting / quick local testing only."""
     all_data = read_fvecs(input_path)
     print(f"Loaded {all_data.shape[0]} vectors of dimension {all_data.shape[1]}")
     subset = all_data[:n]
     write_fvecs(output_path, subset)
     print(f"Saved first {n} vectors to {output_path}")
 
+
+def count_fvecs(fname):
+    file_size = os.path.getsize(fname)
+
+    with open(fname, "rb") as f:
+        dim = int(np.frombuffer(f.read(4), dtype=np.int32)[0])
+
+    record_size = int(4 + dim * 4)
+    n = int(file_size // record_size)
+
+    if file_size % record_size != 0:
+        raise ValueError(
+            f"Invalid fvecs file: {fname}, "
+            f"file_size={file_size}, record_size={record_size}, "
+            f"remainder={file_size % record_size}"
+        )
+
+    return n, dim, record_size
+
+
+def clean_title(s):
+    # DBLP titles come from raw XML and may contain entities like &amp;,
+    # so unescape first, then run through clean_text() for the final
+    # letters-only normalization.
+    if s is None:
+        return ""
+    s = html.unescape(str(s))
+    return clean_text(s)
+
+
+def sample_dblp_titles(xml_path, target_n, seed):
+    rng = random.Random(seed)
+
+    reservoir = []
+    seen = 0
+
+    title_pattern = re.compile(r"<title>(.*?)</title>")
+
+    print(f"Reading DBLP titles from {xml_path} ...")
+
+    with open(xml_path, "r", encoding="utf-8", errors="ignore") as f:
+        for line_no, line in enumerate(f, start=1):
+            m = title_pattern.search(line)
+            if not m:
+                continue
+
+            title = clean_title(m.group(1))
+
+            if not title:
+                continue
+
+            if title.lower() in {"home page", "dblp"}:
+                continue
+
+            seen += 1
+            if len(reservoir) < target_n:
+                reservoir.append(title)
+            else:
+                j = rng.randint(1, seen)
+                if j <= target_n:
+                    reservoir[j - 1] = title
+
+            if seen % 500000 == 0:
+                print(f"seen DBLP titles: {seen}")
+
+    print("total DBLP titles seen:", seen)
+    print("sampled titles:", len(reservoir))
+
+    if len(reservoir) < target_n:
+        raise ValueError(f"Not enough DBLP titles: {len(reservoir)} < {target_n}")
+
+    rng.shuffle(reservoir)
+    return reservoir
+
+
+def write_titles(titles, out_file):
+    print(f"Writing titles to {out_file} ...")
+
+    os.makedirs(os.path.dirname(out_file), exist_ok=True)
+
+    with open(out_file, "w", encoding="utf-8") as f:
+        for i, title in enumerate(titles):
+            f.write(title + "\n")
+
+            if (i + 1) % 100000 == 0:
+                print(f"written titles: {i + 1}/{len(titles)}")
+
+    print("title writing done")
+
+
+def main():
+    if not os.path.exists(IN_FVECS):
+        raise FileNotFoundError(f"Cannot find fvecs file: {IN_FVECS}")
+
+    if not os.path.exists(DBLP_PATH):
+        raise FileNotFoundError(f"Cannot find DBLP file: {DBLP_PATH}")
+
+    n_vecs, dim, record_size = count_fvecs(IN_FVECS)
+
+    print("Input vector file:", IN_FVECS)
+    print("vectors:", n_vecs)
+    print("dim:", dim)
+    print("record size:", record_size)
+
+    if dim != 128:
+        print(f"Warning: SIFT1M usually has dim=128, but got dim={dim}")
+
+    if n_vecs < TARGET_N:
+        raise ValueError(f"Not enough SIFT vectors: {n_vecs} < {TARGET_N}")
+
+    if n_vecs > TARGET_N:
+        print(f"Warning: vector file has {n_vecs} vectors, but only generating {TARGET_N} titles")
+        print("If you use all vectors, set TARGET_N = n_vecs")
+
+    titles = sample_dblp_titles(DBLP_PATH, TARGET_N, SEED)
+    write_titles(titles, OUT_TITLES)
+
+    print("Done.")
+    print(f"Vector file kept unchanged: {IN_FVECS}")
+    print(f"Title output: {OUT_TITLES}")
+    print(f"Title lines: {TARGET_N}")
+
+
 if __name__ == "__main__":
-    extract_first_n(
-        "./sift/sift_base.fvecs",
-        "./sift/sift_base_100k.fvecs",
-        n=100000
-    )
+    main()

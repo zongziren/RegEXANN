@@ -2,20 +2,20 @@
 set -euo pipefail
 
 BIN=./exp/build/regann
-VEC=dataset/words/vectors.fvecs
-STR=dataset/words/strings.txt
-QRY=dataset/words/query.txt
-GT=dataset/words/groundtruth.txt
+VEC=dataset/msong/vectors.fvecs
+STR=dataset/msong/strings.txt
+QRY=dataset/msong/query.txt
+GT=dataset/msong/groundtruth.txt
 K=10
-CLUSTERS=50
+CLUSTERS=200
 MAX_ITER=30
-OUTDIR=results/words
-IDX="${OUTDIR}/idx/words"
+OUTDIR=results/msong
+IDX="${OUTDIR}/idx/msong"
 
 mkdir -p "${OUTDIR}/idx" "${OUTDIR}/logs"
 
 CSV="${OUTDIR}/summary.csv"
-echo "method,param,param_value,recall_pct,avg_time_ms,qps,peak_mem_mb,idx_size_mb" > "${CSV}"
+echo "method,param,param_value,recall_pct,avg_time_ms,qps,peak_mem_mb,idx_size_mb,t1_trigram_parse_ms,t2_cluster_lookup_ms,t3_pq_scan_ms,t4_regex_verify_ms,t5_rerank_ms" > "${CSV}"
 
 # ── Helper ────────────────────────────────────────────────────────────────────
 run() {
@@ -48,14 +48,24 @@ run() {
         idx_size_mb="N/A"
     fi
 
+    # 4-stage pipeline breakdown (printed only for method=ann; N/A for other methods)
+    local t1 t2 t3 t4_regex t5_rerank
+    t1=$(grep -oP '(?<=\(1\) trigram parse  : )[\d.]+' "${log}" || true)
+    t2=$(grep -oP '(?<=\(2\) cluster lookup : )[\d.]+' "${log}" || true)
+    t3=$(grep -oP '(?<=\(3\) PQ candidate scan : )[\d.]+' "${log}" || true)
+    t4_regex=$(grep -oP '(?<=regex=)[\d.]+' "${log}" || true)
+    t5_rerank=$(grep -oP '(?<=rerank=)[\d.]+' "${log}" || true)
+
     recall="${recall:-N/A}"
     avg_time="${avg_time:-N/A}"
     qps="${qps:-N/A}"
     peak_mem_mb="${peak_mem_mb:-N/A}"
     idx_size_mb="${idx_size_mb:-N/A}"
+    t1="${t1:-N/A}"; t2="${t2:-N/A}"; t3="${t3:-N/A}"
+    t4_regex="${t4_regex:-N/A}"; t5_rerank="${t5_rerank:-N/A}"
 
-    echo "${method},${param},${param_val},${recall},${avg_time},${qps},${peak_mem_mb},${idx_size_mb}" >> "${CSV}"
-    echo "     recall=${recall}%  avg_time=${avg_time}ms  QPS=${qps}  peak_mem=${peak_mem_mb}MB  idx_size=${idx_size_mb}MB"
+    echo "${method},${param},${param_val},${recall},${avg_time},${qps},${peak_mem_mb},${idx_size_mb},${t1},${t2},${t3},${t4_regex},${t5_rerank}" >> "${CSV}"
+    echo "     recall=${recall}%  avg_time=${avg_time}ms  QPS=${qps}  peak_mem=${peak_mem_mb}MB  idx_size=${idx_size_mb}MB  [t1=${t1} t2=${t2} t3=${t3} t4_regex=${t4_regex} t5_rerank=${t5_rerank}]"
     echo ""
 }
 
@@ -72,7 +82,7 @@ run() {
 
 # ── 2. RegExANN — ef sweep (6 values) ────────────────────────────────────────
 echo "[ 2 ] RegExANN (ef sweep: 10 20 30 50 75 100)"
-for EF in 10 20 30 50 75 100 200 500; do
+for EF in 10 20 30 50 75 100 500----... 1000 20000; do
     OUT="${OUTDIR}/ann_ef${EF}.txt"
     if [ ! -f "${IDX}.kmidx" ]; then
         run ann ef "${EF}" "${OUT}" pq_m=8 "ef=${EF}" "save=${IDX}"
@@ -98,8 +108,8 @@ done
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo "════════════════════════════════════════════════════════════"
-echo "  Recall / Speed Summary [words]"
-echo "  clusters=50  K=10  queries=100"
+echo "  Recall / Speed Summary [msong]"
+echo "  clusters=200  K=10  queries=100"
 echo "════════════════════════════════════════════════════════════"
 printf "  %-38s  %8s  %12s  %10s  %12s  %12s\n" "Method" "Recall%" "Avg time(ms)" "QPS" "Mem(MB)" "Idx(MB)"
 printf "  %-38s  %8s  %12s  %10s  %12s  %12s\n" \

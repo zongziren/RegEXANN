@@ -1,0 +1,31 @@
+# RegExANN — Python dependencies
+#
+# Covers every Python script under dataset/, scripts/pgvector/, and
+# tools/. The C++ core (exp/) has no Python dependencies and is built
+# separately via cmake — see README.md.
+#
+# Install with:
+#   pip install -r requirements.txt --break-system-packages   # if using system Python
+#   pip install -r requirements.txt                           # inside a venv (recommended)
+
+numpy>=1.24
+
+# dataset/arxiv.py, dataset/dbpedia.py, dataset/song.py
+# HuggingFace dataset loading (arXiv, DBpedia, Spotify track titles)
+datasets>=2.18
+tqdm>=4.66
+
+# dataset/laion.py
+# Reads LAION-1M directly from the HF Hub via the hf:// URI (streamed,
+# no manual download needed). pylance provides the `lance` import name.
+pylance>=0.10
+huggingface_hub>=0.21
+
+# dataset/words.py
+# Word-frequency list + sentence embedding model for the Words dataset
+wordfreq>=3.0
+sentence-transformers>=2.6
+
+# scripts/pgvector/pg_load_hnsw.py, scripts/pgvector/pg_query_hnsw.py
+# Pgvector baseline (requires a running PostgreSQL + pgvector instance)
+psycopg2-binary>=2.9

@@ -1,8 +1,23 @@
 import os
+import re
 import numpy as np
 import lance
 
-DATA_PATH = "laion-1m/data/train.lance"
+
+def clean_text(text) -> str:
+    if text is None:
+        return ""
+    text = str(text)
+    text = re.sub(r"[^a-zA-Z ]", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+# Streamed directly from the Hugging Face Hub via the hf:// URI — lance
+# supports this natively (pylance + huggingface_hub installed), so no
+# separate download step is needed for LAION-1M.
+# Source: https://huggingface.co/datasets/lance-format/laion-1m
+DATA_PATH = "hf://datasets/lance-format/laion-1m/data/train.lance"
 
 OUT_FVECS = "laion_base.fvecs"
 OUT_TEXT = "laion_captions.txt"
@@ -10,13 +25,6 @@ OUT_TEXT = "laion_captions.txt"
 TARGET_N = 1_000_000
 VECTOR_FIELD = "img_emb"
 TEXT_CANDIDATES = ["caption", "text", "TEXT", "title", "description"]
-
-
-def clean_text(x):
-    if x is None:
-        return ""
-    s = str(x).replace("\n", " ").replace("\t", " ")
-    return " ".join(s.split()).strip()
 
 
 def save_fvec(f, vec):

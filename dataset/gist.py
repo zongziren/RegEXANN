@@ -4,6 +4,16 @@ import re
 import html
 import numpy as np
 
+
+def clean_text(text) -> str:
+    if text is None:
+        return ""
+    text = str(text)
+    text = re.sub(r"[^a-zA-Z ]", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
 IN_FVECS = "gist/gist_base.fvecs"
 DBLP_PATH = "dblp/dblp.xml"
 OUT_TITLES = "gist/gist_titles_1m.txt"
@@ -33,14 +43,13 @@ def count_fvecs(fname):
 
 
 def clean_title(s):
+    # DBLP titles come from raw XML and may contain entities like &amp;,
+    # so unescape first, then run through clean_text() for the final
+    # letters-only normalization.
     if s is None:
         return ""
-
-    s = html.unescape(s)
-    s = str(s)
-    s = s.replace("\n", " ").replace("\t", " ")
-    s = " ".join(s.split())
-    return s.strip()
+    s = html.unescape(str(s))
+    return clean_text(s)
 
 
 def sample_dblp_titles(xml_path, target_n, seed):

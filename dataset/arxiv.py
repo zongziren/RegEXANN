@@ -1,5 +1,16 @@
+import re
 from datasets import load_dataset
 import numpy as np
+
+
+def clean_text(text) -> str:
+    if text is None:
+        return ""
+    text = str(text)
+    text = re.sub(r"[^a-zA-Z ]", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
 
 DATASET_NAME = "Qdrant/arxiv-titles-instructorxl-embeddings"
 OUT_TITLE = "arxiv_titles_all.txt"
@@ -19,7 +30,7 @@ with open(OUT_TITLE, "w", encoding="utf-8") as title_f, \
      open(OUT_FVECS, "wb") as fvecs_f:
 
     for i, item in enumerate(ds):
-        title = item["title"].replace("\n", " ")
+        title = clean_text(item["title"])
         vec = np.asarray(item["vector"], dtype=np.float32)
 
         title_f.write(title + "\n")

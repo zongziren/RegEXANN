@@ -1,42 +1,99 @@
-# RegExANN — Compilation and Running Guide
+# RegExANN
 
-## 1. Environment Requirements
+RegExANN is a regex-aware filtered Approximate Nearest Neighbor (ANN) search
+engine. It combines k-means vector clustering, a cluster-level trigram
+inverted index, and Product Quantization (PQ) to prune vector partitions
+using safe trigram evidence extracted from a regex predicate, before
+running approximate vector search and verifying the original regex on the
+surviving candidates.
 
-| Tool          | Minimum Version | Purpose                   |
-| ------------- | --------------- | ------------------------- |
-| g++ / clang++ | C++17 support   | Compilation               |
-| cmake         | 3.10+           | Build system              |
-| python3       | 3.7+            | Auxiliary tools, optional |
+The design targets a gap in existing filtered-ANN work: most prior systems
+support numeric range filters or categorical equality filters, but not
+free-form regular-expression predicates over text attributes. RegExANN
+treats the cluster-level trigram index as the interface between symbolic
+regex filtering and geometric ANN partition selection, so that regex
+predicates prune vector clusters *before* PQ scanning rather than only
+filtering objects before or after ANN search. Cluster-level pruning never
+produces false negatives — every object returned is verified against the
+original regex — but it can retain false-positive clusters, which is an
+intentional precision/recall trade-off discussed in the paper.
 
-Ubuntu / Debian one-command installation:
+This repository contains the C++ implementation, the Python dataset
+preparation pipeline, and the experiment scripts used to reproduce the
+paper's results across eight datasets (arXiv, Words, DBpedia, SIFT1M,
+GIST1M, LAION1M, Msong, Audio).
 
-```bash
-sudo apt-get install -y build-essential cmake
+---
+
+## 1. Repository Layout
+
+```text
+RegEXANN/
+├── exp/                      C++ core (index, search, CLI)
+│   ├── include/
+│   ├── src/
+│   └── CMakeLists.txt
+├── dataset/                  Python dataset acquisition + preparation
+│   ├── download_raw.sh       Downloads raw vectors (SIFT1M, GIST1M, Msong, Audio, DBLP)
+│   ├── arxiv.py / dbpedia.py / gist.py / laion.py / sift.py / song.py / words.py
+│   ├── gen_query.py          Selectivity-controlled query + ground-truth generator
+│   └── gen_query_strict_style.py
+├── scripts/
+│   ├── datasets/              run_<dataset>.sh for all 8 datasets
+│   ├── pgvector/               Pgvector (HNSW) baseline
+│   ├── run_all.sh              Runs all 8 datasets sequentially
+│   ├── run_sift_cluster_ef_sweep.sh
+│   ├── run_sift_pattern_classes.sh
+│   └── gen_queries_all.sh
+└── tools/
+    └── eval_recall.py         Standalone Recall@K tool (no compilation needed)
 ```
 
 ---
 
-## 2. Compilation
+## 2. Environment Requirements
+
+| Tool          | Minimum Version | Purpose                              |
+| ------------- | ---------------- | ------------------------------------ |
+| g++ / clang++ | C++17 support     | Compiling `exp/`                     |
+| cmake         | 3.10+             | Build system                         |
+| python3       | 3.9+              | Dataset preparation, auxiliary tools |
+
+Ubuntu / Debian:
 
 ```bash
-cd RegExANN/exp
+sudo apt-get install -y build-essential cmake python3 python3-pip wget
+```
 
+Python dependencies (only needed for `dataset/` scripts and the Pgvector
+baseline; the C++ core has no Python dependency):
+
+```bash
+pip install -r requirements.txt
+```
+
+---
+
+## 3. Compilation
+
+```bash
+cd exp
 mkdir -p build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
 make -j$(nproc)
 
 # Build outputs:
 #   build/regann        Main program for search and index construction
-#   build/eval_recall   Standalone Recall@K evaluation tool
+#   build/eval_recall    Standalone Recall@K evaluation tool (C++ version)
 ```
 
 ---
 
-## 3. Data Format
+## 4. Data Format
 
-### 3.1 Vector File `.fvecs`
+### 4.1 Vector File `.fvecs`
 
-The standard `fvecs` binary format is used. Each vector is stored as:
+Each vector is stored as:
 
 ```text
 [int32: dim][float32 × dim]
@@ -44,9 +101,9 @@ The standard `fvecs` binary format is used. Each vector is stored as:
 
 The `bvecs` format (`uint8` vectors) is also supported via `fmt=bvecs`.
 
-### 3.2 String File `strings.txt`
+### 4.2 String File `strings.txt`
 
-One string per line, corresponding 1-to-1 with the vector file.
+One string per line, 1-to-1 with the vector file:
 
 ```text
 deep learning for image retrieval
@@ -55,9 +112,10 @@ graph neural network embedding
 ...
 ```
 
-### 3.3 Query File `queries.txt`
+### 4.3 Query File `query.txt`
 
-One query per line: a regular expression, then a space, then the query vector components.
+One query per line: a regular expression, then a space, then the query
+vector components:
 
 ```text
 deep.*learning 0.123 -0.456 0.789 ...
@@ -67,309 +125,230 @@ neural|network 0.001 0.234 -0.567 ...
 
 ---
 
-## 4. Main Program Usage
+## 5. Dataset Preparation
+
+Each of the eight datasets needs three things in `dataset/<name>/`:
+`vectors.fvecs`, `strings.txt`, and `query.txt` (plus a `groundtruth.txt`
+generated separately — see §6).
+
+### 5.1 Download raw source files
 
 ```bash
-./build/regann <vectors.fvecs> <strings.txt> <queries.txt> <K> \
+bash dataset/download_raw.sh          # SIFT1M, GIST1M, Msong, Audio, DBLP
+bash dataset/download_raw.sh sift     # individual targets also work:
+bash dataset/download_raw.sh gist     #   sift | gist | msong | dblp
+```
+
+This downloads the large binary files that are intentionally **not**
+committed to the repo. Sources:
+
+| Dataset       | Source                                              |
+| ------------- | ---------------------------------------------------- |
+| SIFT1M        | `huggingface.co/datasets/qbo-odp/sift1m`              |
+| GIST1M        | `huggingface.co/datasets/maknee/gist1m` (fbin, auto-converted to fvecs) |
+| Msong / Audio | `cse.cuhk.edu.hk/systems/hash/gqr` (GQR datasets)      |
+| DBLP titles   | `dblp.org/xml/dblp.xml.gz`                            |
+| arXiv         | pulled automatically via `datasets.load_dataset()`     |
+| DBpedia       | pulled automatically via `datasets.load_dataset()`     |
+| LAION-1M      | streamed directly via the `hf://` URI in `lance.dataset()` — no download needed |
+| Words         | computed on the fly (`wordfreq` + `sentence-transformers`) — no download needed |
+
+### 5.2 Run the per-dataset preparation script
+
+```bash
+python3 dataset/arxiv.py     # -> arxiv_vectors_all.fvecs, arxiv_titles_all.txt
+python3 dataset/dbpedia.py   # -> dataset/dbpedia/{vectors.fvecs,strings.txt,query.txt,query_vectors.fvecs}
+python3 dataset/gist.py      # -> gist/gist_titles_1m.txt (vectors stay at gist/gist_base.fvecs)
+python3 dataset/sift.py      # -> sift/sift_titles_1m.txt (vectors stay at sift/sift_base.fvecs)
+python3 dataset/laion.py     # -> laion_base.fvecs, laion_captions.txt
+python3 dataset/song.py      # -> msong/msong_titles.txt, audio/audio_titles.txt
+python3 dataset/words.py     # -> base.fvecs, base_words.txt
+```
+
+`dataset/dbpedia.py` is the only script that writes directly into the final
+`dataset/<name>/{vectors.fvecs,strings.txt}` layout. The other six write
+their vectors/titles under loosely-named local paths (matching each raw
+source's own naming), so a final assembly step is needed:
+
+```bash
+mkdir -p dataset/arxiv && mv arxiv_vectors_all.fvecs dataset/arxiv/vectors.fvecs && mv arxiv_titles_all.txt dataset/arxiv/strings.txt
+mkdir -p dataset/gist  && cp gist/gist_base.fvecs dataset/gist/vectors.fvecs && cp gist/gist_titles_1m.txt dataset/gist/strings.txt
+mkdir -p dataset/sift  && cp sift/sift_base.fvecs dataset/sift/vectors.fvecs && cp sift/sift_titles_1m.txt dataset/sift/strings.txt
+mkdir -p dataset/laion && mv laion_base.fvecs dataset/laion/vectors.fvecs && mv laion_captions.txt dataset/laion/strings.txt
+mkdir -p dataset/msong && cp msong/msong_base.fvecs dataset/msong/vectors.fvecs && cp msong/msong_titles.txt dataset/msong/strings.txt
+mkdir -p dataset/audio && cp audio/audio_base.fvecs dataset/audio/vectors.fvecs && cp audio/audio_titles.txt dataset/audio/strings.txt
+mkdir -p dataset/words && mv base.fvecs dataset/words/vectors.fvecs && mv base_words.txt dataset/words/strings.txt
+```
+
+All textual fields are normalized through an inlined `clean_text()` helper
+in each script (letters + spaces only, HTML entities unescaped first where
+relevant, e.g. DBLP-sourced titles).
+
+---
+
+## 6. Generating Query + Ground-Truth Files
+
+```bash
+python3 dataset/gen_query.py \
+    dataset/arxiv/strings.txt \
+    dataset/arxiv/vectors.fvecs \
+    dataset/arxiv/query.txt \
+    dataset/arxiv/groundtruth.txt \
+    --n_queries 1000 --topk 10 --style mixed --seed 42 \
+    --min_selectivity 0.01 --max_selectivity 0.10
+```
+
+`--style` accepts: `substring`, `prefix`, `suffix`, `alternation`,
+`wildcard`, `mixed`, or `all` (cycles evenly through every style).
+
+| Style         | Example              |
+| ------------- | --------------------- |
+| `substring`   | `neural`              |
+| `prefix`      | `^deep`                |
+| `suffix`      | `search$`               |
+| `alternation` | `graph\|network`         |
+| `wildcard`    | `deep.*learning`          |
+| `mixed`       | `ann.*gpu\|gpu.*ann`        |
+
+`dataset/gen_query_strict_style.py` takes the same four positional
+arguments and produces a stricter variant used for the regex
+pattern-class experiment (§9). `scripts/gen_queries_all.sh` wraps
+`gen_query.py` to generate queries for every dataset in one call.
+
+---
+
+## 7. Main Program Usage
+
+```bash
+./exp/build/regann <vectors.fvecs> <strings.txt> <queries.txt> <K> \
                <clusters> <output.txt> <max_iter> <algorithm> [options...]
 ```
 
 | Argument        | Description                                                   |
-| --------------- | ------------------------------------------------------------- |
-| `vectors.fvecs` | Dataset vector file                                           |
-| `strings.txt`   | Dataset string file, corresponding to the vectors             |
-| `queries.txt`   | Query file                                                    |
-| `K`             | Number of nearest neighbors to return                         |
-| `clusters`      | Number of k-means clusters. Recommended range: `50` to `500`  |
-| `output.txt`    | Output file. Each line stores the result IDs for one query    |
-| `max_iter`      | Maximum number of k-means iterations. Recommended value: `30` |
-| `algorithm`     | Algorithm option. See the table below                         |
+| --------------- | --------------------------------------------------------------|
+| `vectors.fvecs` | Dataset vector file                                            |
+| `strings.txt`   | Dataset string file, corresponding to the vectors               |
+| `queries.txt`   | Query file                                                       |
+| `K`             | Number of nearest neighbors to return                            |
+| `clusters`      | Number of k-means clusters (recommended: `50`–`500`)               |
+| `output.txt`    | Output file. Each line stores the result IDs for one query          |
+| `max_iter`      | Maximum k-means iterations (recommended: `30`)                        |
+| `algorithm`     | Algorithm option — see §7.1                                            |
 
-### 4.1 Algorithm Options
+### 7.1 Algorithm Options
 
-| Algorithm     | Description                                                        |
-| ------------- | ------------------------------------------------------------------ |
-| `ann`         | **RegExANN**, the main method: k-means + trigram index + PQ        |
-| `hier`        | Two-level hierarchical RegExANN                                    |
-| `groundtruth` | Exact full scan, used to generate ground truth                     |
-| `baseline`    | Same as `groundtruth`                                              |
-| `prefilter`   | Pre-filtering baseline: regex filter first, then kNN               |
-| `postfilter`  | Post-filtering baseline: kNN first, then regex filter              |
+| Algorithm     | Description                                                  |
+| ------------- | --------------------------------------------------------------|
+| `ann`         | **RegExANN**: k-means + cluster-level trigram index + PQ        |
+| `hier`        | Two-level hierarchical RegExANN                                  |
+| `groundtruth` | Exact full scan, used to generate ground truth                    |
+| `baseline`    | Same as `groundtruth`                                               |
+| `prefilter`   | Pre-filtering baseline: regex filter first, then kNN                  |
+| `postfilter`  | Post-filtering baseline: kNN first, then regex filter                   |
 
-### 4.2 Optional Parameters
+### 7.2 Optional Parameters
 
 All options use `key=value` format.
 
-| Option                | Applicable Algorithms | Default          | Description                                                                                                                                                   |
-| --------------------- | --------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pq_m=N`              | `ann`, `hier`         | `8`              | Number of PQ subspaces. Must divide the vector dimension.                                                                                                     |
-| `pq_ksub=N`           | `ann`, `hier`         | `256`            | Codebook size for each PQ subspace.                                                                                                                           |
-| `ef=N`                | `ann`                 | `K`              | **Candidate pool size (≥ K).** The algorithm collects `ef` regex-matching candidates before stopping, then returns the top-K by exact distance. Larger `ef` → higher recall, slower query. `ef=K` is the original behaviour. |
-| `k0=N`                | `hier`                | `sqrt(clusters)` | Number of coarse clusters.                                                                                                                                    |
-| `nprobe=N`            | `hier`                | `k0/2`           | Number of coarse clusters to probe during search.                                                                                                             |
-| `oversample=N`        | `postfilter`          | `10`             | Initial oversampling factor. The first candidate window is `K × N`.                                                                                           |
-| `max_expansion=N`     | `postfilter`          | `0`              | **Maximum expansion cap.** If fewer than K regex matches are found in the initial window, the window doubles repeatedly until K matches are found or `K × N` total candidates have been scanned. `0` = no cap (scan full dataset if needed). |
-| `sample_ratio=F`      | `prefilter`           | `1.0`            | **Fraction of the regex-matching set to search (0 < F ≤ 1.0).** `1.0` = search all matches (100% recall, original behaviour). Values below 1.0 randomly subsample the match set, trading recall for speed. |
-| `gt=<file>`           | All                   | None             | Ground truth file. If provided, Recall@K is computed and printed automatically.                                                                               |
-| `save=<prefix>`       | `ann`                 | None             | Save the index as `<prefix>.{kmidx,gramidx,pqidx}`.                                                                                                          |
-| `load=<prefix>`       | `ann`                 | None             | Skip index construction and load a saved index.                                                                                                               |
-| `fmt=fvecs\|bvecs`    | All                   | `fvecs`          | Vector file format.                                                                                                                                           |
-| `graph_M=N`           | `graph`               | `16`             | Graph max degree.                                                                                                                                             |
-| `graph_ef_build=N`    | `graph`               | `64`             | Graph build beam width.                                                                                                                                       |
-| `graph_ef_search=N`   | `graph`               | `64`             | Graph search beam width.                                                                                                                                       |
+| Option              | Applies to     | Default          | Description |
+| ------------------- | --------------- | ---------------- | ----------- |
+| `pq_m=N`            | `ann`, `hier`    | `8`               | Number of PQ subspaces (must divide vector dim) |
+| `pq_ksub=N`         | `ann`, `hier`    | `256`             | Codebook size per PQ subspace |
+| `ef=N`              | `ann`            | `K`               | Candidate pool size (≥ K). Larger → higher recall, slower query |
+| `k0=N`              | `hier`           | `sqrt(clusters)`  | Number of coarse clusters |
+| `nprobe=N`          | `hier`           | `k0/2`            | Number of coarse clusters probed |
+| `oversample=N`      | `postfilter`     | `10`              | Initial candidate window is `K × N` |
+| `max_expansion=N`   | `postfilter`     | `0`               | Window doubles until K matches found or `K × N` reached. `0` = no cap |
+| `sample_ratio=F`    | `prefilter`      | `1.0`             | Fraction of the regex-matching set to search (0 < F ≤ 1.0) |
+| `gt=<file>`         | All              | None              | Ground truth file; if given, Recall@K is printed automatically |
+| `save=<prefix>`     | `ann`            | None              | Save the index as `<prefix>.{kmidx,gramidx,pqidx}` |
+| `load=<prefix>`     | `ann`            | None              | Skip index construction and load a saved index |
+| `fmt=fvecs\|bvecs`  | All              | `fvecs`           | Vector file format |
 
 ---
 
-## 5. Recall / Speed Trade-off Parameters
+## 8. Recall / Speed Trade-off Parameters
 
-Three new parameters give fine-grained control over the recall–speed curve for each algorithm:
-
-### 5.1 `ann` — `ef` (candidate pool size)
-
-`ef` is analogous to `efSearch` in HNSW. The search collects `ef` regex-matching candidates (instead of stopping at K), re-ranks them by exact distance, and returns the top-K.
+### 8.1 `ann` — `ef` (candidate pool size)
 
 ```bash
-# Original behaviour (ef = K = 10)
-./build/regann ... ann gt=gt.txt
-
-# Higher recall: collect 50 candidates, return top-10
-./build/regann ... ann ef=50 gt=gt.txt
-
-# Maximum recall sweep
 for EF in 10 20 50 100 200; do
-    ./build/regann ... ann ef=${EF} gt=gt.txt
+    ./exp/build/regann ... ann ef=${EF} gt=gt.txt
 done
 ```
 
 Typical guidance: start at `ef=2K`, increase until recall meets your target.
 
-### 5.2 `postfilter` — adaptive expansion
-
-The classic fixed-oversample approach fails silently when regex selectivity is high (few matches in the dataset): `K × oversample` global neighbors may contain zero matches. The adaptive expansion variant doubles the search window until K matches are found.
+### 8.2 `postfilter` — adaptive expansion
 
 ```bash
-# Fixed window, no expansion (original behaviour)
-./build/regann ... postfilter oversample=10 max_expansion=10 gt=gt.txt
+# Fixed window (original behaviour)
+./exp/build/regann ... postfilter oversample=10 max_expansion=10 gt=gt.txt
 
 # Adaptive: expand until K matches found or full scan
-./build/regann ... postfilter oversample=10 max_expansion=0 gt=gt.txt
-
-# Adaptive with a cost cap: expand up to K×200 candidates
-./build/regann ... postfilter oversample=10 max_expansion=200 gt=gt.txt
+./exp/build/regann ... postfilter oversample=10 max_expansion=0 gt=gt.txt
 ```
 
-### 5.3 `prefilter` — `sample_ratio`
-
-Pre-filtering applies regex first (perfect recall on the match set) then runs exact kNN. With `sample_ratio < 1.0`, only a random fraction of the matching vectors are searched, enabling a recall–speed trade-off.
+### 8.3 `prefilter` — `sample_ratio`
 
 ```bash
-# Original: search 100% of matching vectors (recall = 100%)
-./build/regann ... prefilter sample_ratio=1.0 gt=gt.txt
-
-# Search 20% of matches (faster, lower recall)
-./build/regann ... prefilter sample_ratio=0.2 gt=gt.txt
-
-# Sweep
 for R in 1.0 0.5 0.2 0.1; do
-    ./build/regann ... prefilter sample_ratio=${R} gt=gt.txt
+    ./exp/build/regann ... prefilter sample_ratio=${R} gt=gt.txt
 done
 ```
 
 ---
 
-## 6. Typical Workflow
-
-### Step 1: Generate Ground Truth
+## 9. Experiment Scripts
 
 ```bash
-./build/regann \
-    dataset/arxiv/vectors.fvecs \
-    dataset/arxiv/strings.txt \
-    dataset/arxiv/queries.txt \
-    10 100 \
-    results/arxiv/gt.txt \
-    30 groundtruth
+# Run all 8 datasets sequentially (ef sweep, prefilter sweep, postfilter sweep
+# for each, writing results/<dataset>/summary.csv with the 4-stage pipeline
+# breakdown built in)
+bash scripts/run_all.sh
+
+# A single dataset
+bash scripts/datasets/run_arxiv.sh
+
+# Cluster-count ablation (Figure 4d in the paper)
+bash scripts/run_sift_cluster_ef_sweep.sh
+
+# Regex pattern-class breakdown (Figure 4a in the paper)
+bash scripts/run_sift_pattern_classes.sh
+
+# Pgvector (HNSW) baseline — requires a running PostgreSQL + pgvector instance
+bash scripts/pgvector/run_pg_hnsw_all.sh
 ```
 
-### Step 2: Run RegExANN and Save the Index
+`results/<dataset>/summary.csv` already includes the per-stage timing
+breakdown (`t1_trigram_parse_ms`, `t2_cluster_lookup_ms`, `t3_pq_scan_ms`,
+`t4_regex_verify_ms`, `t5_rerank_ms`) for every `ann` row, so no separate
+profiling pass is required. To build a cross-dataset table, concatenate the
+`method=ann` rows from the per-dataset CSVs, e.g.:
 
-```bash
-./build/regann \
-    dataset/arxiv/vectors.fvecs \
-    dataset/arxiv/strings.txt \
-    dataset/arxiv/queries.txt \
-    10 100 \
-    results/arxiv/ann.txt \
-    30 ann \
-    pq_m=8 ef=50 save=results/arxiv/idx/arxiv gt=results/arxiv/gt.txt
+```python
+import pandas as pd, glob
+dfs = []
+for f in glob.glob("results/*/summary.csv"):
+    d = pd.read_csv(f)
+    d["dataset"] = f.split("/")[1]
+    dfs.append(d[d.method == "ann"])
+pd.concat(dfs).to_csv("results/profile.csv", index=False)
 ```
 
-Example output:
-
-```text
-[INFO] Dataset: 132687 vectors (dim=768), 132687 strings.
-[INFO] Building index (k=100, pq_m=8, pq_ksub=256) …
-[INFO] Trigram index: 3821 trigrams.
-[INFO] Index built in 4231 ms.
-[INFO] Memory: 312.5 MB
-[INFO] ef=50
-[INFO] Queries          : 1000
-[INFO] Avg total time   : 2.14 ms
-[INFO] Avg set-op time  : 0.08 ms
-[INFO] Avg cluster time : 2.05 ms
-[INFO] QPS              : 467.3
-[EVAL] Recall@10 = 94.7 %
-```
-
-### Step 3: Load the Index on Subsequent Runs
-
-```bash
-./build/regann \
-    dataset/arxiv/vectors.fvecs \
-    dataset/arxiv/strings.txt \
-    dataset/arxiv/queries.txt \
-    10 100 \
-    results/arxiv/ann2.txt \
-    30 ann \
-    load=results/arxiv/idx/arxiv ef=50 gt=results/arxiv/gt.txt
-```
-
-### Step 4: Run Baseline Methods
-
-```bash
-# Pre-filtering — original (100% recall)
-./build/regann ... 30 prefilter gt=results/arxiv/gt.txt
-
-# Pre-filtering — 30% sample (faster, lower recall)
-./build/regann ... 30 prefilter sample_ratio=0.3 gt=results/arxiv/gt.txt
-
-# Post-filtering — adaptive expansion (no cap)
-./build/regann ... 30 postfilter oversample=10 max_expansion=0 gt=results/arxiv/gt.txt
-
-# Post-filtering — fixed window (original, oversample=20)
-./build/regann ... 30 postfilter oversample=20 max_expansion=20 gt=results/arxiv/gt.txt
-```
-
-### Step 5: Standalone Recall@K Evaluation
+### 9.1 Standalone Recall@K Evaluation
 
 ```bash
 # C++ tool
-./build/eval_recall --gt results/arxiv/gt.txt \
+./exp/build/eval_recall --gt results/arxiv/gt.txt \
                     --pred results/arxiv/ann.txt \
                     --K 10 --verbose
 
-# Python tool
+# Python tool (no compilation needed)
 python3 tools/eval_recall.py \
     --gt results/arxiv/gt.txt \
     --pred results/arxiv/ann.txt \
     --K 10
-```
-
----
-
-## 7. One-Command Experiment Scripts
-
-### Full baseline comparison
-
-```bash
-DATASET=arxiv \
-VEC=dataset/arxiv/vectors.fvecs \
-STR=dataset/arxiv/strings.txt \
-QRY=dataset/arxiv/queries.txt \
-bash scripts/run_baselines.sh
-```
-
-Runs all methods (ground truth → RegExANN → pre-filter → post-filter → hierarchical) and prints a recall summary table. Key environment variables:
-
-| Variable          | Default         | Description                                     |
-| ----------------- | --------------- | ----------------------------------------------- |
-| `EF_LIST`         | `10 20 50`      | `ef` values to sweep for `ann`                  |
-| `OVERSAMPLE_LIST` | `10 20 50`      | `oversample` values to sweep for `postfilter`   |
-| `MAX_EXPANSION`   | `0`             | `max_expansion` for postfilter (0 = unlimited)  |
-| `SAMPLE_RATIOS`   | `1.0 0.5 0.2`   | `sample_ratio` values to sweep for `prefilter`  |
-| `CLUSTERS`        | `100`           | Number of k-means clusters                      |
-| `PQ_M`            | `8`             | PQ subspaces                                    |
-
-### Single-dataset experiment
-
-```bash
-DATASET=arxiv \
-VEC_FILE=dataset/arxiv/vectors.fvecs \
-STR_FILE=dataset/arxiv/strings.txt \
-QRY_FILE=dataset/arxiv/queries.txt \
-bash scripts/run_experiment.sh
-```
-
-### Cluster count ablation
-
-```bash
-VEC_FILE=... STR_FILE=... QRY_FILE=... GT_FILE=... \
-CLUSTER_COUNTS="10 25 50 100 200 400" \
-bash scripts/sweep_clusters.sh
-# Output: results/<dataset>/sweep_clusters.csv
-```
-
-### ef / sample_ratio / expansion sweep
-
-```bash
-VEC_FILE=... STR_FILE=... QRY_FILE=... GT_FILE=... \
-bash scripts/sweep_params.sh
-# Output: results/<dataset>/sweep_params.csv
-```
-
----
-
-## 8. Generating Query Files
-
-```bash
-python3 tools/gen_queries.py \
-    --fvecs  dataset/arxiv/vectors.fvecs \
-    --strings dataset/arxiv/strings.txt \
-    --output  dataset/arxiv/queries.txt \
-    --num_queries 1000 \
-    --style wildcard \
-    --seed 42
-```
-
-Supported `--style` values:
-
-| Style         | Example              |
-| ------------- | -------------------- |
-| `substring`   | `neural`             |
-| `prefix`      | `deep`               |
-| `suffix`      | `search$`            |
-| `alternation` | `graph\|network`     |
-| `wildcard`    | `deep.*learning`     |
-| `mixed`       | `ann.*gpu\|gpu.*ann` |
-
----
-
-## 9. Dataset Preparation
-
-```bash
-# arXiv
-python3 tools/prepare_dataset.py \
-    --mode arxiv \
-    --emb_file arxiv_embeddings.h5 \
-    --str_file arxiv_titles.txt \
-    --out_vecs dataset/arxiv/vectors.fvecs \
-    --out_strs dataset/arxiv/strings.txt
-
-# SIFT1M with randomly assigned DBLP titles
-python3 tools/prepare_dataset.py \
-    --mode sift \
-    --emb_file sift/sift_base.fvecs \
-    --str_file dblp/titles.txt \
-    --out_vecs dataset/sift1m/vectors.fvecs \
-    --out_strs dataset/sift1m/strings.txt
-
-# General HDF5
-python3 tools/prepare_dataset.py \
-    --mode hdf5 \
-    --emb_file laion1m.h5 \
-    --vec_key emb --str_key caption \
-    --out_vecs dataset/laion1m/vectors.fvecs \
-    --out_strs dataset/laion1m/strings.txt
 ```
 
 ---
@@ -379,17 +358,18 @@ python3 tools/prepare_dataset.py \
 Recommended for large-scale datasets (>1M vectors):
 
 ```bash
-./build/regann \
-    dataset/sift1m/vectors.fvecs \
-    dataset/sift1m/strings.txt \
-    dataset/sift1m/queries.txt \
+./exp/build/regann \
+    dataset/sift/vectors.fvecs \
+    dataset/sift/strings.txt \
+    dataset/sift/query.txt \
     10 100 \
-    results/sift1m/hier.txt \
+    results/sift/hier.txt \
     30 hier \
-    k0=10 nprobe=5 pq_m=8 gt=results/sift1m/gt.txt
+    k0=10 nprobe=5 pq_m=8 gt=results/sift/groundtruth.txt
 ```
 
-`k0` is the number of coarse clusters; `k1 = clusters / k0` is the number of fine clusters per coarse cluster.
+`k0` is the number of coarse clusters; `k1 = clusters / k0` is the number
+of fine clusters per coarse cluster.
 
 ---
 
@@ -402,9 +382,24 @@ neural                  # substring
 graph|network           # alternation
 deep.*learning          # wildcard
 (ann|knn).*search       # grouped alternation
-[a-z]+network           # character class
-^deep                   # anchor (prefix)
-search$                 # anchor (suffix)
-go+gle                  # quantifier +
-colou?r                 # quantifier ?
+[a-z]+network            # character class
+^deep                    # anchor (prefix)
+search$                  # anchor (suffix)
+go+gle                   # quantifier +
+colou?r                  # quantifier ?
+```
+
+---
+
+## 12. Citation
+
+```bibtex
+@article{regexann2027,
+  title   = {RegExANN: Efficient Approximate Nearest Neighbor Search with Regular Expression Filtering},
+  author  = {Zhong, Shurui and Ye, Weitang and Luo, Siqiang},
+  journal = {Proceedings of the VLDB Endowment},
+  volume  = {20},
+  number  = {1},
+  year    = {2027}
+}
 ```

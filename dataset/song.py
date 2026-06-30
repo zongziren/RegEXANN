@@ -1,7 +1,18 @@
+import os
+import re
 from datasets import load_dataset
 import random
-import os
 import numpy as np
+
+
+def clean_text(text) -> str:
+    if text is None:
+        return ""
+    text = str(text)
+    text = re.sub(r"[^a-zA-Z ]", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
 
 MSONG_FVECS = "./msong/msong_base.fvecs"
 AUDIO_FVECS = "./audio/audio_base.fvecs"
@@ -38,8 +49,8 @@ ds = load_dataset("maharshipandya/spotify-tracks-dataset", split="train")
 titles = []
 
 for item in ds:
-    name = str(item.get("track_name", "")).replace("\n", " ").strip()
-    artist = str(item.get("artists", "")).replace("\n", " ").strip()
+    name = clean_text(item.get("track_name", ""))
+    artist = clean_text(item.get("artists", ""))
 
     if not name or name.lower() == "nan":
         continue
@@ -51,7 +62,6 @@ for item in ds:
 
     titles.append(title)
 
-# 去掉完全重复的 title-artist
 titles = list(dict.fromkeys(titles))
 
 print("unique source titles:", len(titles))

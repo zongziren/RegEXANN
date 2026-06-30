@@ -116,7 +116,7 @@ for DATASET in "${DATASETS[@]}"; do
         BUILD_TIME_LOG="${OUTDIR}/build_time.log"
 
         /usr/bin/time -v -o "${BUILD_TIME_LOG}" \
-        python3 scripts/pg_load_hnsw.py \
+        python3 scripts/pgvector/pg_load_hnsw.py \
             --db "${DB}" \
             --host "${HOST}" \
             --port "${PORT}" \
@@ -168,7 +168,7 @@ for DATASET in "${DATASETS[@]}"; do
         LOG="${OUTDIR}/ef${EF}.log"
         OUT="${OUTDIR}/ef${EF}_results.csv"
 
-        python3 scripts/pg_query_hnsw.py \
+        python3 scripts/pgvector/pg_query_hnsw.py \
             --db "${DB}" \
             --host "${HOST}" \
             --port "${PORT}" \
