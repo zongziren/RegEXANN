@@ -348,16 +348,3 @@ go+gle                   # quantifier +
 colou?r                  # quantifier ?
 ```
 
----
-
-## 11. Citation
-
-```bibtex
-@article{regexann2027,
-  title   = {RegExANN: Efficient Approximate Nearest Neighbor Search with Regular Expression Filtering},
-  author  = {Zhong, Shurui and Ye, Weitang and Luo, Siqiang},
-  volume  = {20},
-  number  = {1},
-  year    = {2027}
-}
-```
