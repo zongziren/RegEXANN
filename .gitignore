@@ -8,12 +8,13 @@ dataset/msong
 dataset/audio
 dataset/laion
 dataset/dbpedia
+scripts/pgvector
 
 build
 exp/build
 .vscode
 results
 
-scripts/pgvector
+
 
 
