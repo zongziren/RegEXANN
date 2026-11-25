@@ -16,7 +16,7 @@
 //   pq_m=N          PQ subspaces                  [ann/hier, default 8]
 //   pq_ksub=N       PQ centroids per subspace      [ann/hier, default 256]
 //   k0=N            Coarse clusters               [hier, default sqrt(clusters)]
-//   nprobe=N        Coarse clusters to probe       [hier, default k0/2]
+//   nprobe=N        Candidate cluster cap [ann, default 0]; coarse probes [hier, default k0/2]
 //   oversample=N    Post-filter oversample factor  [postfilter, default 10]
 //   gt=<file>       Ground-truth file for Recall@K
 //   save=<prefix>   Save index after build         [ann only]
@@ -66,7 +66,7 @@ struct Options {
     int   oversample  = 10;
     int   max_expansion = 0;    // postfilter: max expansion factor (0 = unlimited)
     int   ef          = 0;      // ann: candidate pool size (0 → use K)
-    int   ann_nprobe  = 0;      // ann: max clusters to scan (0 → all candidate clusters)
+    int   ann_nprobe  = 0;      // ann: max clusters to scan (0 = heuristic early stopping)
     float sample_ratio = 1.0f;  // prefilter: fraction of matching set to search
     int  graph_M         = 16;
     int  graph_ef_build  = 64;
@@ -140,7 +140,6 @@ struct Options {
             if      (key == "pq_m")         pq_m          = std::stoi(val);
             else if (key == "pq_ksub")      pq_ksub       = std::stoi(val);
             else if (key == "k0")           k0            = std::stoi(val);
-            else if (key == "nprobe")       nprobe        = std::stoi(val);
             else if (key == "oversample")   oversample    = std::stoi(val);
             else if (key == "max_expansion") max_expansion = std::stoi(val);
             else if (key == "ef")           ef            = std::stoi(val);
@@ -327,8 +326,8 @@ static void run_ann(
     int eff_ef = (opts.ef > 0) ? opts.ef : K;
     std::cout << "[INFO] ef=" << eff_ef
               << (opts.ef <= 0 ? " (default=K, original behaviour)" : "") << "\n";
-    std::cout << "[INFO] nprobe=" << (opts.ann_nprobe > 0 ? opts.ann_nprobe : -1)
-              << (opts.ann_nprobe <= 0 ? " (scan all candidate clusters)" : "") << "\n";
+    std::cout << "[INFO] nprobe=" << opts.ann_nprobe
+              << (opts.ann_nprobe == 0 ? " (heuristic early stopping)" : "") << "\n";
 
     std::string line;
     int qcnt = 0;
@@ -553,7 +552,9 @@ int main(int argc, char* argv[]) {
 "  ef=N              Candidate pool size (>=K)    [ann, default K]\n"
 "                    Larger ef → higher recall, slower query.\n"
 "  k0=N              Coarse clusters              [hier, default sqrt(clusters)]\n"
-"  nprobe=N          Coarse probe count           [hier, default k0/2]\n"
+"  nprobe=N          Candidate cluster cap        [ann, default 0]\n"
+"                    0 = heuristic early stopping.\n"
+"                    Coarse probe count           [hier, default k0/2]\n"
 "  oversample=N      Post-filter initial window   [postfilter, default 10]\n"
 "  max_expansion=N   Post-filter max window cap   [postfilter, default 0=unlimited]\n"
 "                    0 = expand until K found or full scan; N = cap at K*N.\n"

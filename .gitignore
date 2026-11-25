@@ -8,7 +8,7 @@ dataset/msong
 dataset/audio
 dataset/laion
 dataset/dbpedia
-scripts/pgvector/*
+scripts/pgvector
 
 build
 exp/build
