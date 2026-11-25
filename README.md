@@ -40,7 +40,6 @@ RegEXANN/
 │   └── gen_query_strict_style.py
 ├── scripts/
 │   ├── datasets/              run_<dataset>.sh for all 8 datasets
-│   ├── pgvector/               Pgvector (HNSW) baseline
 │   ├── run_all.sh              Runs all 8 datasets sequentially
 │   ├── run_sift_cluster_ef_sweep.sh
 │   ├── run_sift_pattern_classes.sh
@@ -312,8 +311,6 @@ bash scripts/run_sift_cluster_ef_sweep.sh
 # Regex pattern-class breakdown (Figure 4a in the paper)
 bash scripts/run_sift_pattern_classes.sh
 
-# Pgvector (HNSW) baseline — requires a running PostgreSQL + pgvector instance
-bash scripts/pgvector/run_pg_hnsw_all.sh
 ```
 
 `results/<dataset>/summary.csv` already includes the per-stage timing
